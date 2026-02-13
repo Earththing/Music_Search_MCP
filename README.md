@@ -7,7 +7,7 @@ An MCP server that searches your music library using vague recollections. Descri
 | Step | Feature | Status |
 |------|---------|--------|
 | 1 | Spotify integration — fetch liked songs | **Done** |
-| 2 | Last.fm integration — fetch scrobble history | Planned |
+| 2 | Last.fm integration — fetch scrobble history | **Done** |
 | 3 | Lyrics fetching (Genius/Musixmatch/lrclib) | Planned |
 | 4 | Embedding pipeline + vector database (ChromaDB) | Planned |
 | 5 | Semantic search — query with vague descriptions | Planned |
@@ -20,6 +20,7 @@ An MCP server that searches your music library using vague recollections. Descri
 
 - Python 3.11+
 - A Spotify Developer account
+- A Last.fm account with API key
 
 ### 1. Clone and install
 
@@ -36,28 +37,41 @@ pip install -e .
 3. Set the Redirect URI to `http://127.0.0.1:8888/callback` (must use IP, not `localhost`)
 4. Note your Client ID and Client Secret
 
-### 3. Configure credentials
+### 3. Create a Last.fm API account
+
+1. Go to [Last.fm API Account Creation](https://www.last.fm/api/account/create)
+2. Note your API Key (shared secret is not needed)
+
+### 4. Configure credentials
 
 ```bash
 copy .env.example .env
 ```
 
-Edit `.env` and fill in your Spotify credentials:
+Edit `.env` and fill in your credentials:
 
 ```
 SPOTIFY_CLIENT_ID=your_client_id_here
 SPOTIFY_CLIENT_SECRET=your_client_secret_here
 SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
+
+LASTFM_API_KEY=your_api_key_here
+LASTFM_USERNAME=your_lastfm_username
 ```
 
-### 4. Fetch your liked songs
+### 5. Fetch your music data
 
 ```bash
+# Spotify liked songs
 music-search liked-songs          # Fetch all liked songs
 music-search liked-songs -n 20    # Fetch first 20
+
+# Last.fm scrobble history
+music-search scrobbles            # Fetch all scrobbles (can be slow for large histories)
+music-search scrobbles -n 50      # Fetch most recent 50
 ```
 
-On first run, a browser window will open for Spotify login. The token is cached locally for subsequent runs.
+On first Spotify run, a browser window will open for login. The token is cached locally for subsequent runs.
 
 ## Architecture
 
@@ -66,10 +80,12 @@ music_search_mcp/
   __init__.py         # Package root
   config.py           # Environment/config management
   spotify_client.py   # Spotify API client (auth + data fetching)
+  lastfm_client.py    # Last.fm API client (scrobble history)
   cli.py              # CLI entry point for testing
 ```
 
 **Key design decisions:**
 - **spotipy** library for Spotify OAuth2 + API calls
+- **Last.fm API** accessed directly via `requests` (simple API key auth, no OAuth needed)
 - Token cached locally (`.spotify_token_cache`) so you only log in once
 - Songs normalized to a consistent dict format for downstream processing

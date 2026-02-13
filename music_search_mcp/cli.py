@@ -34,6 +34,40 @@ def cmd_liked_songs(args):
     print(f"\nTotal: {len(songs)} songs")
 
 
+def cmd_scrobbles(args):
+    """Fetch and display scrobble history from Last.fm."""
+    from .config import get_lastfm_config
+    from .lastfm_client import fetch_scrobbles, get_scrobble_stats
+
+    limit = args.limit
+
+    try:
+        get_lastfm_config()  # Validate credentials before starting
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Show total scrobbles first
+    stats = get_scrobble_stats()
+    print(f"Last.fm account has {stats['total_scrobbles']:,} total scrobbles.")
+    print(f"Fetching scrobbles{f' (limit: {limit})' if limit else ' (all — this may take a while)'}...")
+    print()
+
+    scrobbles = fetch_scrobbles(limit=limit)
+
+    print(f"{'#':<5} {'Title':<40} {'Artist':<30} {'Date':<20}")
+    print("-" * 95)
+
+    for i, scrobble in enumerate(scrobbles, 1):
+        title = scrobble["name"][:38]
+        artist = scrobble["artist"][:28]
+        date = scrobble["date_text"] or ""
+        prefix = "▶ " if scrobble["now_playing"] else ""
+        print(f"{i:<5} {prefix}{title:<40} {artist:<30} {date:<20}")
+
+    print(f"\nShowing: {len(scrobbles)} scrobbles")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="music-search",
@@ -50,6 +84,16 @@ def main():
         help="Maximum number of songs to fetch (default: all)",
     )
     liked_parser.set_defaults(func=cmd_liked_songs)
+
+    # scrobbles command
+    scrobble_parser = subparsers.add_parser("scrobbles", help="Fetch your Last.fm scrobble history")
+    scrobble_parser.add_argument(
+        "-n", "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of scrobbles to fetch (default: all)",
+    )
+    scrobble_parser.set_defaults(func=cmd_scrobbles)
 
     args = parser.parse_args()
 

@@ -28,3 +28,20 @@ def get_spotify_config() -> dict:
         "client_secret": client_secret,
         "redirect_uri": redirect_uri,
     }
+
+
+def get_lastfm_config() -> dict:
+    """Return Last.fm API configuration from environment variables."""
+    api_key = os.getenv("LASTFM_API_KEY")
+    username = os.getenv("LASTFM_USERNAME")
+
+    if not api_key or not username:
+        raise ValueError(
+            "LASTFM_API_KEY and LASTFM_USERNAME must be set in .env\n"
+            "Create an API account at https://www.last.fm/api/account/create"
+        )
+
+    return {
+        "api_key": api_key,
+        "username": username,
+    }

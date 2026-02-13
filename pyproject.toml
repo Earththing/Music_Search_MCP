@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "spotipy>=2.24.0",
     "python-dotenv>=1.0.0",
+    "requests>=2.25.0",
 ]
 
 [project.scripts]
