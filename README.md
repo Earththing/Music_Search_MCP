@@ -11,7 +11,7 @@ An MCP server that searches your music library using vague recollections. Descri
 | 3 | Lyrics fetching via LRCLIB + caching | **Done** |
 | 4 | Embedding pipeline + vector database (ChromaDB) | **Done** |
 | 5 | Semantic search -- query with vague descriptions | **Done** |
-| 6 | MCP server -- expose search as MCP tool | Planned |
+| 6 | MCP server -- expose search as MCP tool | **Done** |
 | 7 | Spotify playback integration (stretch goal) | Planned |
 
 ### Future Ideas
@@ -124,6 +124,74 @@ music-search search melancholy indie song -v                  # Show lyrics prev
 
 The search uses cosine similarity against embedded lyrics + metadata, returning matches ranked by relevance score.
 
+## MCP Server (Claude Desktop Integration)
+
+The project includes an MCP server that exposes the semantic search as a tool for Claude Desktop (or any MCP-compatible client). This lets you search your music library by chatting with Claude.
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `search_music` | Search your library with a natural language description |
+| `library_status` | Check what data is indexed and whether the pipeline is set up |
+
+### Setup
+
+1. Make sure you have completed steps 1-8 above (load songs, enrich lyrics, build index).
+
+2. Install the project (if not already):
+   ```bash
+   pip install -e .
+   ```
+
+3. Configure Claude Desktop. Open (or create) the config file:
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+   Add the music search server:
+   ```json
+   {
+     "mcpServers": {
+       "music-search": {
+         "command": "music-search-mcp"
+       }
+     }
+   }
+   ```
+
+   If `music-search-mcp` is not on your PATH, use the full path:
+   ```json
+   {
+     "mcpServers": {
+       "music-search": {
+         "command": "C:\\path\\to\\your\\venv\\Scripts\\music-search-mcp.exe"
+       }
+     }
+   }
+   ```
+
+4. Restart Claude Desktop completely (quit from system tray, then relaunch). The music search tools should appear in the tools menu.
+
+### Usage Examples
+
+Once connected, ask Claude things like:
+
+- "Search my music library for that sad song about rain"
+- "Find upbeat dance tracks with synthesizers in my collection"
+- "What's the status of my music search library?"
+- "Can you find the song where they sing about letting go?"
+
+### Note on First Search
+
+The first search after starting the server takes ~7 seconds because the embedding model loads into memory. Subsequent searches are fast (under 1 second). The model stays cached for the lifetime of the server process.
+
+### Running Manually (for testing)
+
+```bash
+music-search-mcp                          # Start the MCP server on stdio
+mcp dev music_search_mcp/mcp_server.py    # Use the MCP CLI inspector (requires mcp[cli])
+```
+
 ## Architecture
 
 ```
@@ -137,6 +205,7 @@ music_search_mcp/
   song_store.py       # Local JSON storage for song lists (avoid re-fetching)
   vector_store.py     # ChromaDB vector store for semantic search
   cli.py              # CLI entry point for testing
+  mcp_server.py       # MCP server for Claude Desktop integration
 
 data/
   spotify_songs.json    # Liked songs from Spotify (auto-created, gitignored)

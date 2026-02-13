@@ -582,10 +582,32 @@ def cmd_index(args):
 
 def cmd_search(args):
     """Search the vector index with a natural language query."""
+    import time
+    import shutil
     from .vector_store import search, get_index_stats
 
-    # Check if index exists
-    stats = get_index_stats(model_name=args.model)
+    # Spinner characters for animated progress
+    _SPINNER = ["|", "/", "-", "\\"]
+    _spin_idx = 0
+
+    def _search_progress(message: str) -> None:
+        """Display a progress message with a spinner on the same line."""
+        nonlocal _spin_idx
+        width = shutil.get_terminal_size().columns - 1
+        spinner = _SPINNER[_spin_idx % len(_SPINNER)]
+        _spin_idx += 1
+        line = f"  {spinner} {message}"
+        sys.stdout.write(f"\r{_truncate_to_width(line, width)}")
+        sys.stdout.flush()
+
+    def _clear_progress() -> None:
+        """Clear the progress line."""
+        width = shutil.get_terminal_size().columns - 1
+        sys.stdout.write(f"\r{' ' * width}\r")
+        sys.stdout.flush()
+
+    # Quick lightweight check first (no model loading)
+    stats = get_index_stats(lightweight=True)
     if stats["collection_size"] == 0:
         print("No songs indexed yet. Run 'music-search index' first.")
         sys.exit(1)
@@ -593,7 +615,17 @@ def cmd_search(args):
     query = " ".join(args.query)
     print(f"Searching {stats['collection_size']} songs for: \"{query}\"\n")
 
-    results = search(query, n_results=args.limit, model_name=args.model)
+    t_start = time.perf_counter()
+
+    results = search(
+        query,
+        n_results=args.limit,
+        model_name=args.model,
+        progress_callback=_search_progress,
+    )
+
+    t_elapsed = time.perf_counter() - t_start
+    _clear_progress()
 
     if not results:
         print("No results found.")
@@ -606,6 +638,8 @@ def cmd_search(args):
         if args.verbose:
             print(f"   Preview: {result['document_preview']}")
         print()
+
+    print(f"  Search completed in {t_elapsed:.1f}s")
 
 
 def main():
