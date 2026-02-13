@@ -107,23 +107,102 @@ def _progress(current: int, total: int, message: str, width: int = 80) -> None:
     sys.stdout.flush()
 
 
+def _get_artist_name(song: dict, source: str) -> str:
+    """Extract artist name from a song dict based on source format."""
+    if source == "spotify":
+        return song["artists"][0] if song.get("artists") else ""
+    else:  # lastfm
+        return song.get("artist", "")
+
+
+def _deduplicate_songs(songs: list[dict], source: str) -> list[dict]:
+    """Remove duplicate songs (same track + artist), keeping first occurrence."""
+    seen = set()
+    unique = []
+    for song in songs:
+        artist = _get_artist_name(song, source)
+        key = f"{song['name'].strip().lower()}||{artist.strip().lower()}"
+        if key not in seen:
+            seen.add(key)
+            unique.append(song)
+    return unique
+
+
 def cmd_lyrics_enrich(args):
-    """Fetch lyrics for your Spotify liked songs, with local caching."""
-    from .config import get_spotify_config
-    from .spotify_client import fetch_liked_songs
+    """Fetch lyrics for your music library, with local caching."""
     from .lyrics_client import fetch_lyrics_for_songs
     from .lyrics_cache import get_cached_lyrics, save_lyrics_to_cache, get_cache_stats
 
-    try:
-        get_spotify_config()
-    except ValueError as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
-        sys.exit(1)
-
+    source = args.source
     force = args.force
     limit = args.limit
-    print(f"Fetching liked songs from Spotify{f' (limit: {limit})' if limit else ''}...")
-    songs = fetch_liked_songs(limit=limit)
+
+    # Fetch songs from the chosen source
+    if source == "spotify":
+        from .config import get_spotify_config
+        from .spotify_client import fetch_liked_songs
+        try:
+            get_spotify_config()
+        except ValueError as e:
+            print(f"Configuration error: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Fetching liked songs from Spotify{f' (limit: {limit})' if limit else ''}...")
+        songs = fetch_liked_songs(limit=limit)
+
+    elif source == "lastfm":
+        from .config import get_lastfm_config
+        from .lastfm_client import fetch_scrobbles, get_scrobble_stats
+        try:
+            get_lastfm_config()
+        except ValueError as e:
+            print(f"Configuration error: {e}", file=sys.stderr)
+            sys.exit(1)
+        stats = get_scrobble_stats()
+        print(f"Last.fm account has {stats['total_scrobbles']:,} total scrobbles.")
+        print(f"Fetching scrobbles{f' (limit: {limit})' if limit else ''}...")
+        scrobbles = fetch_scrobbles(limit=limit)
+        # Deduplicate: scrobble history has many repeats of the same song
+        songs = _deduplicate_songs(scrobbles, source)
+        print(f"  {len(scrobbles)} scrobbles -> {len(songs)} unique songs")
+
+    elif source == "both":
+        from .config import get_spotify_config, get_lastfm_config
+        from .spotify_client import fetch_liked_songs
+        from .lastfm_client import fetch_scrobbles, get_scrobble_stats
+        try:
+            get_spotify_config()
+            get_lastfm_config()
+        except ValueError as e:
+            print(f"Configuration error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Fetch from both sources
+        print(f"Fetching liked songs from Spotify...")
+        spotify_songs = fetch_liked_songs(limit=limit)
+        print(f"  {len(spotify_songs)} liked songs")
+
+        stats = get_scrobble_stats()
+        print(f"Fetching scrobbles from Last.fm ({stats['total_scrobbles']:,} total)...")
+        scrobbles = fetch_scrobbles(limit=limit)
+        print(f"  {len(scrobbles)} scrobbles")
+
+        # Normalize Last.fm songs to have same artist field format for dedup
+        lastfm_normalized = []
+        for s in scrobbles:
+            lastfm_normalized.append({
+                **s,
+                "artists": [s["artist"]],  # match Spotify format
+            })
+
+        # Combine and deduplicate across both sources
+        combined = spotify_songs + lastfm_normalized
+        songs = _deduplicate_songs(combined, "spotify")  # use spotify format since we normalized
+        source = "spotify"  # use spotify field mapping from here on
+        print(f"  Combined: {len(songs)} unique songs")
+
+    else:
+        print(f"Unknown source: {source}", file=sys.stderr)
+        sys.exit(1)
 
     # Check cache stats
     cache_stats = get_cache_stats()
@@ -141,7 +220,7 @@ def cmd_lyrics_enrich(args):
     api_lookups = 0
 
     for i, song in enumerate(songs, 1):
-        artist = song["artists"][0] if song["artists"] else ""
+        artist = _get_artist_name(song, source)
         track_name = song["name"]
 
         _progress(i, len(songs), f"Looking up: {track_name[:40]} - {artist[:20]}")
@@ -160,7 +239,7 @@ def cmd_lyrics_enrich(args):
             }
         else:
             api_lookups += 1
-            result = fetch_lyrics_for_songs([song], source="spotify")[0]
+            result = fetch_lyrics_for_songs([song], source=source)[0]
             # Save to cache
             save_lyrics_to_cache(track_name, artist, result)
 
@@ -185,7 +264,7 @@ def cmd_lyrics_enrich(args):
 
     for i, song in enumerate(enriched, 1):
         title = song["name"][:33]
-        artist = (song["artists"][0] if song["artists"] else "")[:23]
+        artist = _get_artist_name(song, source)[:23]
         if song["instrumental"]:
             status = "[instrumental]"
         elif song["lyrics_found"]:
@@ -245,13 +324,19 @@ def main():
     # lyrics-enrich command
     lyrics_enrich_parser = subparsers.add_parser(
         "lyrics-enrich",
-        help="Fetch lyrics for your Spotify liked songs",
+        help="Fetch lyrics for your music library",
     )
     lyrics_enrich_parser.add_argument(
         "-n", "--limit",
         type=int,
         default=None,
         help="Maximum number of songs to enrich (default: all)",
+    )
+    lyrics_enrich_parser.add_argument(
+        "--source",
+        choices=["spotify", "lastfm", "both"],
+        default="spotify",
+        help="Music source: spotify (liked songs), lastfm (scrobbles), or both (default: spotify)",
     )
     lyrics_enrich_parser.add_argument(
         "--force",
