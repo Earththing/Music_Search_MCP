@@ -9,8 +9,8 @@ An MCP server that searches your music library using vague recollections. Descri
 | 1 | Spotify integration -- fetch liked songs | **Done** |
 | 2 | Last.fm integration -- fetch scrobble history | **Done** |
 | 3 | Lyrics fetching via LRCLIB + caching | **Done** |
-| 4 | Embedding pipeline + vector database (ChromaDB) | Planned |
-| 5 | Semantic search -- query with vague descriptions | Planned |
+| 4 | Embedding pipeline + vector database (ChromaDB) | **Done** |
+| 5 | Semantic search -- query with vague descriptions | **Done** |
 | 6 | MCP server -- expose search as MCP tool | Planned |
 | 7 | Spotify playback integration (stretch goal) | Planned |
 
@@ -91,6 +91,33 @@ On first Spotify run, a browser window will open for login. The token is cached 
 
 Lyrics are cached in `data/lyrics_cache.json` so subsequent runs skip already-fetched songs.
 
+### 6. Build the search index
+
+Once you have lyrics cached, build the vector search index:
+
+```bash
+music-search index                              # Build index from cached lyrics
+music-search index --model all-MiniLM-L6-v2     # Specify embedding model (this is the default)
+```
+
+The first run downloads the embedding model (~80MB). Subsequent runs use the cached model.
+
+If you have an NVIDIA GPU with CUDA, embeddings will automatically run on GPU. Otherwise it falls back to CPU (still fast for typical library sizes).
+
+### 7. Search your library
+
+Search with natural language -- describe the song however you remember it:
+
+```bash
+music-search search that sad song about rain
+music-search search upbeat dance track with synthesizers
+music-search search "the one where they sing about letting go"
+music-search search piano ballad about lost love -n 10        # More results
+music-search search melancholy indie song -v                  # Show lyrics preview
+```
+
+The search uses cosine similarity against embedded lyrics + metadata, returning matches ranked by relevance score.
+
 ## Architecture
 
 ```
@@ -101,7 +128,12 @@ music_search_mcp/
   lastfm_client.py    # Last.fm API client (scrobble history)
   lyrics_client.py    # LRCLIB lyrics fetcher (free, no API key)
   lyrics_cache.py     # Local JSON cache for fetched lyrics
+  vector_store.py     # ChromaDB vector store for semantic search
   cli.py              # CLI entry point for testing
+
+data/
+  lyrics_cache.json   # Cached lyrics (auto-created, gitignored)
+  chroma_db/          # Vector database (auto-created, gitignored)
 ```
 
 **Key design decisions:**
@@ -110,6 +142,9 @@ music_search_mcp/
 - **LRCLIB** for lyrics -- free, no API key, no rate limits, returns full plain-text lyrics
 - **httpx** used for LRCLIB (better TLS compatibility than urllib3/requests on some systems)
 - **Lyrics cache** -- JSON file so songs don't need re-fetching between runs; shared across sources
+- **ChromaDB** for local persistent vector storage with cosine similarity
+- **sentence-transformers** (`all-MiniLM-L6-v2`) for embeddings -- ~80MB model, fast on CPU, auto-uses GPU/CUDA if available
+- Each song is embedded as a combined document of lyrics + metadata (title, artist, album), enabling search by mood, theme, lyric fragments, or song identity
 - Token cached locally (`.spotify_token_cache`) so you only log in once
 - Songs normalized to a consistent dict format for downstream processing
 - Last.fm scrobbles auto-deduplicated (same song played 50 times = 1 lyrics lookup)

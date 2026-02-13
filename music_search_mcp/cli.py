@@ -276,6 +276,78 @@ def cmd_lyrics_enrich(args):
         print(f"{i:<5} {title:<35} {artist:<25} {status:<15}")
 
 
+def cmd_index(args):
+    """Build the vector search index from cached lyrics."""
+    from .lyrics_cache import _load_cache
+    from .vector_store import index_songs, get_index_stats
+
+    # Check for GPU
+    try:
+        import torch
+        device = "GPU (CUDA)" if torch.cuda.is_available() else "CPU"
+        if torch.cuda.is_available():
+            device += f" - {torch.cuda.get_device_name(0)}"
+    except ImportError:
+        device = "CPU"
+
+    print(f"Embedding device: {device}")
+    print(f"Embedding model:  {args.model}\n")
+
+    # Load all cached lyrics
+    cache = _load_cache()
+    if not cache:
+        print("No lyrics cached yet. Run 'music-search lyrics-enrich' first.")
+        sys.exit(1)
+
+    songs = list(cache.values())
+    songs_with_content = [s for s in songs if s.get("lyrics_found")]
+
+    print(f"Lyrics cache: {len(songs)} total, {len(songs_with_content)} with lyrics/instrumental")
+
+    if not songs_with_content:
+        print("No songs with lyrics to index.")
+        sys.exit(1)
+
+    print(f"Indexing {len(songs_with_content)} songs into vector database...")
+    print("(First run will download the embedding model ~80MB)\n")
+
+    stats = index_songs(songs_with_content, model_name=args.model)
+
+    print(f"\nIndexing complete:")
+    print(f"  Processed:       {stats['total_processed']}")
+    print(f"  Indexed:         {stats['indexed']}")
+    print(f"  Skipped:         {stats['skipped']}")
+    print(f"  Collection size: {stats['collection_size']}")
+
+
+def cmd_search(args):
+    """Search the vector index with a natural language query."""
+    from .vector_store import search, get_index_stats
+
+    # Check if index exists
+    stats = get_index_stats(model_name=args.model)
+    if stats["collection_size"] == 0:
+        print("No songs indexed yet. Run 'music-search index' first.")
+        sys.exit(1)
+
+    query = " ".join(args.query)
+    print(f"Searching {stats['collection_size']} songs for: \"{query}\"\n")
+
+    results = search(query, n_results=args.limit, model_name=args.model)
+
+    if not results:
+        print("No results found.")
+        return
+
+    for i, result in enumerate(results, 1):
+        score_pct = result["score"] * 100
+        print(f"{i}. {result['track_name']} - {result['artist_name']}")
+        print(f"   Album: {result['album']}  |  Match: {score_pct:.1f}%")
+        if args.verbose:
+            print(f"   Preview: {result['document_preview']}")
+        print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="music-search",
@@ -346,6 +418,46 @@ def main():
         help="Re-fetch lyrics even if already cached",
     )
     lyrics_enrich_parser.set_defaults(func=cmd_lyrics_enrich)
+
+    # index command
+    index_parser = subparsers.add_parser(
+        "index",
+        help="Build the vector search index from cached lyrics",
+    )
+    index_parser.add_argument(
+        "--model",
+        default="all-MiniLM-L6-v2",
+        help="Sentence-transformer model for embeddings (default: all-MiniLM-L6-v2)",
+    )
+    index_parser.set_defaults(func=cmd_index)
+
+    # search command
+    search_parser = subparsers.add_parser(
+        "search",
+        help="Search your music library with a vague description",
+    )
+    search_parser.add_argument(
+        "query",
+        nargs="+",
+        help="Natural language query (e.g. 'that sad piano song about letting go')",
+    )
+    search_parser.add_argument(
+        "-n", "--limit",
+        type=int,
+        default=5,
+        help="Maximum number of results (default: 5)",
+    )
+    search_parser.add_argument(
+        "--model",
+        default="all-MiniLM-L6-v2",
+        help="Sentence-transformer model (must match index model)",
+    )
+    search_parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Show document preview for each result",
+    )
+    search_parser.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
 
