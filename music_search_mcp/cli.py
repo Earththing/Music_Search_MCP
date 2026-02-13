@@ -99,11 +99,20 @@ def cmd_lyrics_search(args):
         print()
 
 
+def _progress(current: int, total: int, message: str, width: int = 80) -> None:
+    """Write a progress line that fully clears the previous one."""
+    line = f"  [{current}/{total}] {message}"
+    # Pad with spaces to overwrite any leftover characters from previous line
+    sys.stdout.write(f"\r{line:<{width}}")
+    sys.stdout.flush()
+
+
 def cmd_lyrics_enrich(args):
-    """Fetch lyrics for your Spotify liked songs."""
+    """Fetch lyrics for your Spotify liked songs, with local caching."""
     from .config import get_spotify_config
     from .spotify_client import fetch_liked_songs
     from .lyrics_client import fetch_lyrics_for_songs
+    from .lyrics_cache import get_cached_lyrics, save_lyrics_to_cache, get_cache_stats
 
     try:
         get_spotify_config()
@@ -111,21 +120,50 @@ def cmd_lyrics_enrich(args):
         print(f"Configuration error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    force = args.force
     limit = args.limit
     print(f"Fetching liked songs from Spotify{f' (limit: {limit})' if limit else ''}...")
     songs = fetch_liked_songs(limit=limit)
+
+    # Check cache stats
+    cache_stats = get_cache_stats()
+    if cache_stats["total"] > 0 and not force:
+        print(f"Lyrics cache: {cache_stats['total']} songs cached "
+              f"({cache_stats['with_lyrics']} with lyrics, "
+              f"{cache_stats['not_found']} not found)")
+
     print(f"Found {len(songs)} songs. Fetching lyrics from LRCLIB...\n")
 
     enriched = []
     found = 0
     instrumental = 0
+    cached_hits = 0
+    api_lookups = 0
 
     for i, song in enumerate(songs, 1):
         artist = song["artists"][0] if song["artists"] else ""
-        sys.stdout.write(f"\r  [{i}/{len(songs)}] Looking up: {song['name'][:40]} - {artist[:20]}   ")
-        sys.stdout.flush()
+        track_name = song["name"]
 
-        result = fetch_lyrics_for_songs([song], source="spotify")[0]
+        _progress(i, len(songs), f"Looking up: {track_name[:40]} - {artist[:20]}")
+
+        # Check cache first (unless --force)
+        cached = None if force else get_cached_lyrics(track_name, artist)
+
+        if cached is not None:
+            cached_hits += 1
+            result = {
+                **song,
+                "plain_lyrics": cached["plain_lyrics"],
+                "synced_lyrics": cached["synced_lyrics"],
+                "instrumental": cached["instrumental"],
+                "lyrics_found": cached["lyrics_found"],
+            }
+        else:
+            api_lookups += 1
+            result = fetch_lyrics_for_songs([song], source="spotify")[0]
+            # Save to cache
+            save_lyrics_to_cache(track_name, artist, result)
+
         enriched.append(result)
 
         if result["lyrics_found"]:
@@ -138,10 +176,12 @@ def cmd_lyrics_enrich(args):
     print(f"  Lyrics found:   {found}/{len(songs)}")
     print(f"  Instrumental:   {instrumental}/{len(songs)}")
     print(f"  Not found:      {len(songs) - found - instrumental}/{len(songs)}")
+    print(f"  From cache:     {cached_hits}")
+    print(f"  API lookups:    {api_lookups}")
 
     # Show summary table
-    print(f"\n{'#':<5} {'Title':<35} {'Artist':<25} {'Lyrics':<10}")
-    print("-" * 75)
+    print(f"\n{'#':<5} {'Title':<35} {'Artist':<25} {'Lyrics':<15}")
+    print("-" * 80)
 
     for i, song in enumerate(enriched, 1):
         title = song["name"][:33]
@@ -152,7 +192,7 @@ def cmd_lyrics_enrich(args):
             status = "[found]"
         else:
             status = "[missing]"
-        print(f"{i:<5} {title:<35} {artist:<25} {status:<10}")
+        print(f"{i:<5} {title:<35} {artist:<25} {status:<15}")
 
 
 def main():
@@ -212,6 +252,11 @@ def main():
         type=int,
         default=None,
         help="Maximum number of songs to enrich (default: all)",
+    )
+    lyrics_enrich_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-fetch lyrics even if already cached",
     )
     lyrics_enrich_parser.set_defaults(func=cmd_lyrics_enrich)
 
