@@ -1,7 +1,8 @@
 """Lyrics fetching client using the LRCLIB API.
 
 LRCLIB (https://lrclib.net) is a free, open lyrics database.
-No API key required, no rate limits.
+No API key required, no documented rate limits. The project encourages
+setting a User-Agent with app name and project URL.
 
 Uses httpx instead of requests because lrclib.net's TLS configuration
 is incompatible with urllib3/requests on some Python installations.
@@ -10,7 +11,9 @@ is incompatible with urllib3/requests on some Python installations.
 import httpx
 
 LRCLIB_API_URL = "https://lrclib.net/api"
-_HEADERS = {"User-Agent": "MusicSearchMCP/0.1.0"}
+_HEADERS = {
+    "User-Agent": "MusicSearchMCP/0.1.0 (https://github.com/Earththing/Music_Search_MCP)",
+}
 
 
 def search_lyrics(query: str, limit: int = 5) -> list[dict]:

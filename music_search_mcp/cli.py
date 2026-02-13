@@ -326,8 +326,36 @@ def cmd_status(args):
         print(f"Vector index: empty  (run 'music-search index')")
 
 
+def _enrich_one_song(song, source, force, get_cached_lyrics, save_lyrics_to_cache,
+                     fetch_lyrics_for_songs, cache_lock):
+    """Look up lyrics for a single song. Thread-safe via cache_lock."""
+    artist = _get_artist_name(song, source)
+    track_name = song["name"]
+
+    # Check cache first (unless --force)
+    with cache_lock:
+        cached = None if force else get_cached_lyrics(track_name, artist)
+
+    if cached is not None:
+        result = {
+            **song,
+            "plain_lyrics": cached["plain_lyrics"],
+            "synced_lyrics": cached["synced_lyrics"],
+            "instrumental": cached["instrumental"],
+            "lyrics_found": cached["lyrics_found"],
+        }
+        return result, True  # (result, was_cached)
+    else:
+        result = fetch_lyrics_for_songs([song], source=source)[0]
+        with cache_lock:
+            save_lyrics_to_cache(track_name, artist, result)
+        return result, False  # (result, was_cached)
+
+
 def cmd_lyrics_enrich(args):
     """Fetch lyrics for your music library, with local caching."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from .lyrics_client import fetch_lyrics_for_songs
     from .lyrics_cache import get_cached_lyrics, save_lyrics_to_cache, get_cache_stats
 
@@ -335,6 +363,7 @@ def cmd_lyrics_enrich(args):
     force = args.force
     limit = args.limit
     new_only = args.new
+    workers = args.workers
 
     if limit is not None and new_only is not None:
         print("Cannot use both -n/--limit and --new at the same time.", file=sys.stderr)
@@ -358,12 +387,15 @@ def cmd_lyrics_enrich(args):
 
     # If --new mode, filter out already-cached songs before processing
     if new_only and not force:
+        from .lyrics_cache import _load_cache, _make_key
+        # Load cache once into memory instead of reading file per song
+        cache_data = _load_cache()
         uncached_songs = []
         skipped = 0
         for song in songs:
             artist = _get_artist_name(song, source)
-            cached = get_cached_lyrics(song["name"], artist)
-            if cached is None:
+            key = _make_key(song["name"], artist)
+            if key not in cache_data:
                 uncached_songs.append(song)
             else:
                 skipped += 1
@@ -376,11 +408,11 @@ def cmd_lyrics_enrich(args):
             print("No new songs to enrich. All songs are already cached!")
             return
 
-    # Apply regular -n limit (in non --new mode)
-    # Note: in regular mode, limit was already applied during fetch
-
     total_songs = len(songs)
-    print(f"Enriching {total_songs} songs with lyrics from LRCLIB...\n")
+    if workers > 1:
+        print(f"Enriching {total_songs} songs with lyrics from LRCLIB ({workers} workers)...\n")
+    else:
+        print(f"Enriching {total_songs} songs with lyrics from LRCLIB...\n")
 
     enriched = []
     found = 0
@@ -388,42 +420,92 @@ def cmd_lyrics_enrich(args):
     cached_hits = 0
     api_lookups = 0
     interrupted = False
+    cache_lock = threading.Lock()
+    completed_count = 0
 
-    try:
-        for i, song in enumerate(songs, 1):
-            artist = _get_artist_name(song, source)
-            track_name = song["name"]
+    if workers <= 1:
+        # Sequential mode (original behavior)
+        try:
+            for i, song in enumerate(songs, 1):
+                artist = _get_artist_name(song, source)
+                track_name = song["name"]
 
-            _progress(i, total_songs, f"Looking up: {track_name[:40]} - {artist[:20]}")
+                _progress(i, total_songs, f"Looking up: {track_name[:40]} - {artist[:20]}")
 
-            # Check cache first (unless --force)
-            cached = None if force else get_cached_lyrics(track_name, artist)
+                result, was_cached = _enrich_one_song(
+                    song, source, force, get_cached_lyrics, save_lyrics_to_cache,
+                    fetch_lyrics_for_songs, cache_lock,
+                )
 
-            if cached is not None:
-                cached_hits += 1
-                result = {
-                    **song,
-                    "plain_lyrics": cached["plain_lyrics"],
-                    "synced_lyrics": cached["synced_lyrics"],
-                    "instrumental": cached["instrumental"],
-                    "lyrics_found": cached["lyrics_found"],
-                }
-            else:
-                api_lookups += 1
-                result = fetch_lyrics_for_songs([song], source=source)[0]
-                # Save to cache immediately (so Ctrl+C never loses data)
-                save_lyrics_to_cache(track_name, artist, result)
-
-            enriched.append(result)
-
-            if result["lyrics_found"]:
-                if result["instrumental"]:
-                    instrumental += 1
+                if was_cached:
+                    cached_hits += 1
                 else:
-                    found += 1
+                    api_lookups += 1
 
-    except KeyboardInterrupt:
-        interrupted = True
+                enriched.append(result)
+
+                if result["lyrics_found"]:
+                    if result["instrumental"]:
+                        instrumental += 1
+                    else:
+                        found += 1
+
+        except KeyboardInterrupt:
+            interrupted = True
+    else:
+        # Concurrent mode
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_song = {}
+                for song in songs:
+                    future = executor.submit(
+                        _enrich_one_song, song, source, force,
+                        get_cached_lyrics, save_lyrics_to_cache,
+                        fetch_lyrics_for_songs, cache_lock,
+                    )
+                    future_to_song[future] = song
+
+                for future in as_completed(future_to_song):
+                    completed_count += 1
+                    song = future_to_song[future]
+                    artist = _get_artist_name(song, source)
+                    track_name = song["name"]
+
+                    _progress(completed_count, total_songs,
+                              f"Done: {track_name[:40]} - {artist[:20]}")
+
+                    try:
+                        result, was_cached = future.result()
+                    except Exception as e:
+                        # If a single lookup fails, record it as not found
+                        result = {
+                            **song,
+                            "plain_lyrics": None,
+                            "synced_lyrics": None,
+                            "instrumental": False,
+                            "lyrics_found": False,
+                        }
+                        was_cached = False
+                        api_lookups += 1
+
+                    if was_cached:
+                        cached_hits += 1
+                    else:
+                        api_lookups += 1
+
+                    enriched.append(result)
+
+                    if result["lyrics_found"]:
+                        if result["instrumental"]:
+                            instrumental += 1
+                        else:
+                            found += 1
+
+        except KeyboardInterrupt:
+            interrupted = True
+            # ThreadPoolExecutor.__exit__ will cancel pending futures
+
+    if interrupted:
         processed = len(enriched)
         print(f"\n\n  Interrupted! Processed {processed}/{total_songs} songs.")
         print(f"  All {api_lookups} API lookups have been saved to cache.")
@@ -620,6 +702,13 @@ def main():
         "--force",
         action="store_true",
         help="Re-fetch lyrics even if already cached",
+    )
+    lyrics_enrich_parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of concurrent LRCLIB lookups (default: 1). Try 4-8 for faster enrichment.",
     )
     lyrics_enrich_parser.set_defaults(func=cmd_lyrics_enrich)
 

@@ -1,4 +1,8 @@
-"""Last.fm API client for fetching scrobble history."""
+"""Last.fm API client for fetching scrobble history.
+
+Rate limits: Last.fm allows max 5 requests/second averaged over 5 minutes.
+We throttle to ~4 req/sec (250ms between requests) to stay safely under.
+"""
 
 import time
 import requests
@@ -10,6 +14,10 @@ LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/"
 # Retry config for transient server errors
 _MAX_RETRIES = 5
 _RETRY_DELAY = 3  # seconds, doubles each retry
+
+# Rate limit: Last.fm allows 5 req/sec. We target 4 req/sec to be safe.
+_MIN_REQUEST_INTERVAL = 0.25  # seconds between requests
+_last_request_time = 0.0
 
 
 def _lastfm_request(method: str, **params) -> dict:
@@ -34,9 +42,16 @@ def _lastfm_request(method: str, **params) -> dict:
         **params,
     }
 
+    # Throttle: ensure minimum interval between requests
+    global _last_request_time
+    elapsed = time.time() - _last_request_time
+    if elapsed < _MIN_REQUEST_INTERVAL:
+        time.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+
     delay = _RETRY_DELAY
     for attempt in range(_MAX_RETRIES):
         try:
+            _last_request_time = time.time()
             resp = requests.get(LASTFM_API_URL, params=query, timeout=30)
             resp.raise_for_status()
 
