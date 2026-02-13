@@ -33,7 +33,7 @@ pip install -e .
 
 1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
 2. Create a new app
-3. Set the Redirect URI to `http://localhost:8888/callback`
+3. Set the Redirect URI to `http://127.0.0.1:8888/callback` (must use IP, not `localhost`)
 4. Note your Client ID and Client Secret
 
 ### 3. Configure credentials
@@ -47,7 +47,7 @@ Edit `.env` and fill in your Spotify credentials:
 ```
 SPOTIFY_CLIENT_ID=your_client_id_here
 SPOTIFY_CLIENT_SECRET=your_client_secret_here
-SPOTIFY_REDIRECT_URI=http://localhost:8888/callback
+SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
 ```
 
 ### 4. Fetch your liked songs

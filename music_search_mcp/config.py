@@ -14,7 +14,7 @@ def get_spotify_config() -> dict:
     """Return Spotify API configuration from environment variables."""
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-    redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8888/callback")
+    redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
 
     if not client_id or not client_secret:
         raise ValueError(
