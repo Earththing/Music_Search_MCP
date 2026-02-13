@@ -1,0 +1,12 @@
+[project]
+name = "music-search-mcp"
+version = "0.1.0"
+description = "An MCP server that searches your music library using vague recollections"
+requires-python = ">=3.11"
+dependencies = [
+    "spotipy>=2.24.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+music-search = "music_search_mcp.cli:main"
