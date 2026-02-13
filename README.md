@@ -1,17 +1,17 @@
 # Music Search MCP
 
-An MCP server that searches your music library using vague recollections. Describe a song you barely remember — a lyric fragment, a mood, a fuzzy memory — and it finds it in your listening history.
+An MCP server that searches your music library using vague recollections. Describe a song you barely remember -- a lyric fragment, a mood, a fuzzy memory -- and it finds it in your listening history.
 
 ## Project Roadmap
 
 | Step | Feature | Status |
 |------|---------|--------|
-| 1 | Spotify integration — fetch liked songs | **Done** |
-| 2 | Last.fm integration — fetch scrobble history | **Done** |
-| 3 | Lyrics fetching (Genius/Musixmatch/lrclib) | Planned |
+| 1 | Spotify integration -- fetch liked songs | **Done** |
+| 2 | Last.fm integration -- fetch scrobble history | **Done** |
+| 3 | Lyrics fetching via LRCLIB | **Done** |
 | 4 | Embedding pipeline + vector database (ChromaDB) | Planned |
-| 5 | Semantic search — query with vague descriptions | Planned |
-| 6 | MCP server — expose search as MCP tool | Planned |
+| 5 | Semantic search -- query with vague descriptions | Planned |
+| 6 | MCP server -- expose search as MCP tool | Planned |
 | 7 | Spotify playback integration (stretch goal) | Planned |
 
 ## Setup
@@ -69,6 +69,13 @@ music-search liked-songs -n 20    # Fetch first 20
 # Last.fm scrobble history
 music-search scrobbles            # Fetch all scrobbles (can be slow for large histories)
 music-search scrobbles -n 50      # Fetch most recent 50
+
+# Search for lyrics (no API key needed)
+music-search lyrics-search never gonna give you up rick astley
+music-search lyrics-search bohemian rhapsody --show-lyrics
+
+# Enrich your Spotify liked songs with lyrics
+music-search lyrics-enrich -n 20  # Fetch lyrics for first 20 liked songs
 ```
 
 On first Spotify run, a browser window will open for login. The token is cached locally for subsequent runs.
@@ -81,11 +88,14 @@ music_search_mcp/
   config.py           # Environment/config management
   spotify_client.py   # Spotify API client (auth + data fetching)
   lastfm_client.py    # Last.fm API client (scrobble history)
+  lyrics_client.py    # LRCLIB lyrics fetcher (free, no API key)
   cli.py              # CLI entry point for testing
 ```
 
 **Key design decisions:**
 - **spotipy** library for Spotify OAuth2 + API calls
 - **Last.fm API** accessed directly via `requests` (simple API key auth, no OAuth needed)
+- **LRCLIB** for lyrics -- free, no API key, no rate limits, returns full plain-text lyrics
+- **httpx** used for LRCLIB (better TLS compatibility than urllib3/requests on some systems)
 - Token cached locally (`.spotify_token_cache`) so you only log in once
 - Songs normalized to a consistent dict format for downstream processing

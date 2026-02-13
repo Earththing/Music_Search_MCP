@@ -62,10 +62,97 @@ def cmd_scrobbles(args):
         title = scrobble["name"][:38]
         artist = scrobble["artist"][:28]
         date = scrobble["date_text"] or ""
-        prefix = "▶ " if scrobble["now_playing"] else ""
+        prefix = "> " if scrobble["now_playing"] else ""
         print(f"{i:<5} {prefix}{title:<40} {artist:<30} {date:<20}")
 
     print(f"\nShowing: {len(scrobbles)} scrobbles")
+
+
+def cmd_lyrics_search(args):
+    """Search for lyrics using a free-text query."""
+    from .lyrics_client import search_lyrics
+
+    query = " ".join(args.query)
+    print(f"Searching LRCLIB for: {query}\n")
+
+    results = search_lyrics(query, limit=args.limit)
+
+    if not results:
+        print("No results found.")
+        return
+
+    for i, result in enumerate(results, 1):
+        status = "[instrumental]" if result["instrumental"] else ""
+        has_lyrics = "yes" if result["plain_lyrics"] else "no"
+        print(f"{i}. {result['name']} — {result['artist']}")
+        print(f"   Album: {result['album']}  |  Lyrics: {has_lyrics}  {status}")
+
+        if args.show_lyrics and result["plain_lyrics"]:
+            # Show first few lines as preview
+            lines = result["plain_lyrics"].strip().split("\n")
+            preview = lines[:6]
+            print(f"   ---")
+            for line in preview:
+                print(f"   {line}")
+            if len(lines) > 6:
+                print(f"   ... ({len(lines) - 6} more lines)")
+        print()
+
+
+def cmd_lyrics_enrich(args):
+    """Fetch lyrics for your Spotify liked songs."""
+    from .config import get_spotify_config
+    from .spotify_client import fetch_liked_songs
+    from .lyrics_client import fetch_lyrics_for_songs
+
+    try:
+        get_spotify_config()
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    limit = args.limit
+    print(f"Fetching liked songs from Spotify{f' (limit: {limit})' if limit else ''}...")
+    songs = fetch_liked_songs(limit=limit)
+    print(f"Found {len(songs)} songs. Fetching lyrics from LRCLIB...\n")
+
+    enriched = []
+    found = 0
+    instrumental = 0
+
+    for i, song in enumerate(songs, 1):
+        artist = song["artists"][0] if song["artists"] else ""
+        sys.stdout.write(f"\r  [{i}/{len(songs)}] Looking up: {song['name'][:40]} - {artist[:20]}   ")
+        sys.stdout.flush()
+
+        result = fetch_lyrics_for_songs([song], source="spotify")[0]
+        enriched.append(result)
+
+        if result["lyrics_found"]:
+            if result["instrumental"]:
+                instrumental += 1
+            else:
+                found += 1
+
+    print(f"\n\nResults:")
+    print(f"  Lyrics found:   {found}/{len(songs)}")
+    print(f"  Instrumental:   {instrumental}/{len(songs)}")
+    print(f"  Not found:      {len(songs) - found - instrumental}/{len(songs)}")
+
+    # Show summary table
+    print(f"\n{'#':<5} {'Title':<35} {'Artist':<25} {'Lyrics':<10}")
+    print("-" * 75)
+
+    for i, song in enumerate(enriched, 1):
+        title = song["name"][:33]
+        artist = (song["artists"][0] if song["artists"] else "")[:23]
+        if song["instrumental"]:
+            status = "[instrumental]"
+        elif song["lyrics_found"]:
+            status = "[found]"
+        else:
+            status = "[missing]"
+        print(f"{i:<5} {title:<35} {artist:<25} {status:<10}")
 
 
 def main():
@@ -94,6 +181,39 @@ def main():
         help="Maximum number of scrobbles to fetch (default: all)",
     )
     scrobble_parser.set_defaults(func=cmd_scrobbles)
+
+    # lyrics-search command
+    lyrics_search_parser = subparsers.add_parser("lyrics-search", help="Search LRCLIB for lyrics")
+    lyrics_search_parser.add_argument(
+        "query",
+        nargs="+",
+        help="Search query (e.g. 'never gonna give you up rick astley')",
+    )
+    lyrics_search_parser.add_argument(
+        "-n", "--limit",
+        type=int,
+        default=5,
+        help="Maximum number of results (default: 5)",
+    )
+    lyrics_search_parser.add_argument(
+        "--show-lyrics",
+        action="store_true",
+        help="Show a preview of the lyrics",
+    )
+    lyrics_search_parser.set_defaults(func=cmd_lyrics_search)
+
+    # lyrics-enrich command
+    lyrics_enrich_parser = subparsers.add_parser(
+        "lyrics-enrich",
+        help="Fetch lyrics for your Spotify liked songs",
+    )
+    lyrics_enrich_parser.add_argument(
+        "-n", "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of songs to enrich (default: all)",
+    )
+    lyrics_enrich_parser.set_defaults(func=cmd_lyrics_enrich)
 
     args = parser.parse_args()
 
