@@ -133,9 +133,26 @@ def _deduplicate_songs(songs: list[dict], source: str) -> list[dict]:
 def _load_songs_from_store(source: str) -> tuple[list[dict], str]:
     """Load songs from local store. Returns (songs, effective_source).
 
+    When source is "auto", uses whatever is available locally (both > spotify > lastfm).
     Falls back with a helpful error if the store hasn't been populated yet.
     """
     from .song_store import load_spotify_songs, load_lastfm_scrobbles
+
+    # Auto-detect: use whatever's available
+    if source == "auto":
+        spotify_data = load_spotify_songs()
+        lastfm_data = load_lastfm_scrobbles()
+
+        if spotify_data and lastfm_data:
+            source = "both"
+        elif spotify_data:
+            source = "spotify"
+        elif lastfm_data:
+            source = "lastfm"
+        else:
+            print("No songs stored locally yet.", file=sys.stderr)
+            print("Run 'music-search load spotify' and/or 'music-search load lastfm' first.", file=sys.stderr)
+            sys.exit(1)
 
     if source == "spotify":
         data = load_spotify_songs()
@@ -219,6 +236,7 @@ def cmd_load(args):
         stats = get_scrobble_stats()
         print(f"Last.fm account has {stats['total_scrobbles']:,} total scrobbles.")
         print("Fetching scrobbles (this may take a while for large histories)...")
+        print("Press Ctrl+C to stop early — what's been fetched so far will be saved.\n")
         scrobbles = fetch_scrobbles(limit=None)
         # Deduplicate before saving
         unique = _deduplicate_songs(scrobbles, "lastfm")
@@ -334,43 +352,54 @@ def cmd_lyrics_enrich(args):
     instrumental = 0
     cached_hits = 0
     api_lookups = 0
+    interrupted = False
 
-    for i, song in enumerate(songs, 1):
-        artist = _get_artist_name(song, source)
-        track_name = song["name"]
+    try:
+        for i, song in enumerate(songs, 1):
+            artist = _get_artist_name(song, source)
+            track_name = song["name"]
 
-        _progress(i, total_songs, f"Looking up: {track_name[:40]} - {artist[:20]}")
+            _progress(i, total_songs, f"Looking up: {track_name[:40]} - {artist[:20]}")
 
-        # Check cache first (unless --force)
-        cached = None if force else get_cached_lyrics(track_name, artist)
+            # Check cache first (unless --force)
+            cached = None if force else get_cached_lyrics(track_name, artist)
 
-        if cached is not None:
-            cached_hits += 1
-            result = {
-                **song,
-                "plain_lyrics": cached["plain_lyrics"],
-                "synced_lyrics": cached["synced_lyrics"],
-                "instrumental": cached["instrumental"],
-                "lyrics_found": cached["lyrics_found"],
-            }
-        else:
-            api_lookups += 1
-            result = fetch_lyrics_for_songs([song], source=source)[0]
-            # Save to cache
-            save_lyrics_to_cache(track_name, artist, result)
-
-        enriched.append(result)
-
-        if result["lyrics_found"]:
-            if result["instrumental"]:
-                instrumental += 1
+            if cached is not None:
+                cached_hits += 1
+                result = {
+                    **song,
+                    "plain_lyrics": cached["plain_lyrics"],
+                    "synced_lyrics": cached["synced_lyrics"],
+                    "instrumental": cached["instrumental"],
+                    "lyrics_found": cached["lyrics_found"],
+                }
             else:
-                found += 1
+                api_lookups += 1
+                result = fetch_lyrics_for_songs([song], source=source)[0]
+                # Save to cache immediately (so Ctrl+C never loses data)
+                save_lyrics_to_cache(track_name, artist, result)
 
-    print(f"\n\nResults:")
-    print(f"  Lyrics found:   {found}/{total_songs}")
-    print(f"  Instrumental:   {instrumental}/{total_songs}")
-    print(f"  Not found:      {total_songs - found - instrumental}/{total_songs}")
+            enriched.append(result)
+
+            if result["lyrics_found"]:
+                if result["instrumental"]:
+                    instrumental += 1
+                else:
+                    found += 1
+
+    except KeyboardInterrupt:
+        interrupted = True
+        processed = len(enriched)
+        print(f"\n\n  Interrupted! Processed {processed}/{total_songs} songs.")
+        print(f"  All {api_lookups} API lookups have been saved to cache.")
+        print(f"  Run again to continue where you left off.\n")
+
+    processed = len(enriched)
+    label = f" (interrupted)" if interrupted else ""
+    print(f"\n\nResults{label}:")
+    print(f"  Lyrics found:   {found}/{processed}")
+    print(f"  Instrumental:   {instrumental}/{processed}")
+    print(f"  Not found:      {processed - found - instrumental}/{processed}")
     print(f"  From cache:     {cached_hits}")
     print(f"  API lookups:    {api_lookups}")
 
@@ -548,9 +577,9 @@ def main():
     )
     lyrics_enrich_parser.add_argument(
         "--source",
-        choices=["spotify", "lastfm", "both"],
-        default="spotify",
-        help="Music source: spotify (liked songs), lastfm (scrobbles), or both (default: spotify)",
+        choices=["auto", "spotify", "lastfm", "both"],
+        default="auto",
+        help="Music source: auto (use whatever is loaded), spotify, lastfm, or both (default: auto)",
     )
     lyrics_enrich_parser.add_argument(
         "--force",

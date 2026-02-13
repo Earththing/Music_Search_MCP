@@ -87,59 +87,65 @@ def fetch_scrobbles(limit: int | None = None) -> list[dict]:
     page = 1
     per_page = 200  # Last.fm API max per request
 
-    while True:
-        data = _lastfm_request(
-            "user.getRecentTracks",
-            user=username,
-            limit=per_page,
-            page=page,
-            extended=0,
-        )
+    try:
+        while True:
+            data = _lastfm_request(
+                "user.getRecentTracks",
+                user=username,
+                limit=per_page,
+                page=page,
+                extended=0,
+            )
 
-        tracks_data = data.get("recenttracks", {})
-        tracks = tracks_data.get("track", [])
+            tracks_data = data.get("recenttracks", {})
+            tracks = tracks_data.get("track", [])
 
-        # If only one track, the API returns a dict instead of a list
-        if isinstance(tracks, dict):
-            tracks = [tracks]
+            # If only one track, the API returns a dict instead of a list
+            if isinstance(tracks, dict):
+                tracks = [tracks]
 
-        if not tracks:
-            break
+            if not tracks:
+                break
 
-        for track in tracks:
-            is_now_playing = track.get("@attr", {}).get("nowplaying") == "true"
+            for track in tracks:
+                is_now_playing = track.get("@attr", {}).get("nowplaying") == "true"
 
-            scrobbles.append({
-                "name": track.get("name", ""),
-                "artist": track.get("artist", {}).get("#text", ""),
-                "album": track.get("album", {}).get("#text", ""),
-                "timestamp": track.get("date", {}).get("uts") if not is_now_playing else None,
-                "date_text": track.get("date", {}).get("#text") if not is_now_playing else "Now playing",
-                "now_playing": is_now_playing,
-                "lastfm_url": track.get("url", ""),
-            })
+                scrobbles.append({
+                    "name": track.get("name", ""),
+                    "artist": track.get("artist", {}).get("#text", ""),
+                    "album": track.get("album", {}).get("#text", ""),
+                    "timestamp": track.get("date", {}).get("uts") if not is_now_playing else None,
+                    "date_text": track.get("date", {}).get("#text") if not is_now_playing else "Now playing",
+                    "now_playing": is_now_playing,
+                    "lastfm_url": track.get("url", ""),
+                })
 
-        if limit and len(scrobbles) >= limit:
-            scrobbles = scrobbles[:limit]
-            break
+            if limit and len(scrobbles) >= limit:
+                scrobbles = scrobbles[:limit]
+                break
 
-        # Check pagination
-        attr = tracks_data.get("@attr", {})
-        total_pages = int(attr.get("totalPages", 1))
+            # Check pagination
+            attr = tracks_data.get("@attr", {})
+            total_pages = int(attr.get("totalPages", 1))
 
-        # Progress feedback for large fetches
-        if total_pages > 5:
-            import sys
-            import shutil
-            width = shutil.get_terminal_size().columns - 1
-            line = f"  Page {page}/{total_pages} ({len(scrobbles):,} scrobbles so far)"
-            sys.stdout.write(f"\r{line[:width]:<{width}}")
-            sys.stdout.flush()
+            # Progress feedback for large fetches
+            if total_pages > 5:
+                import sys
+                import shutil
+                width = shutil.get_terminal_size().columns - 1
+                line = f"  Page {page}/{total_pages} ({len(scrobbles):,} scrobbles so far)"
+                sys.stdout.write(f"\r{line[:width]:<{width}}")
+                sys.stdout.flush()
 
-        if page >= total_pages:
-            break
+            if page >= total_pages:
+                break
 
-        page += 1
+            page += 1
+
+    except KeyboardInterrupt:
+        import sys
+        print(f"\n  Interrupted! Returning {len(scrobbles):,} scrobbles fetched so far.",
+              file=sys.stderr)
 
     # Clear progress line if we printed one
     if page > 5:

@@ -52,33 +52,39 @@ def fetch_liked_songs(limit: int | None = None) -> list[dict]:
     batch_size = 50  # Spotify API max per request
     offset = 0
 
-    while True:
-        results = sp.current_user_saved_tracks(limit=batch_size, offset=offset)
-        items = results.get("items", [])
+    try:
+        while True:
+            results = sp.current_user_saved_tracks(limit=batch_size, offset=offset)
+            items = results.get("items", [])
 
-        if not items:
-            break
+            if not items:
+                break
 
-        for item in items:
-            track = item["track"]
-            songs.append({
-                "id": track["id"],
-                "name": track["name"],
-                "artists": [artist["name"] for artist in track["artists"]],
-                "album": track["album"]["name"],
-                "added_at": item["added_at"],
-                "duration_ms": track["duration_ms"],
-                "spotify_url": track["external_urls"].get("spotify", ""),
-            })
+            for item in items:
+                track = item["track"]
+                songs.append({
+                    "id": track["id"],
+                    "name": track["name"],
+                    "artists": [artist["name"] for artist in track["artists"]],
+                    "album": track["album"]["name"],
+                    "added_at": item["added_at"],
+                    "duration_ms": track["duration_ms"],
+                    "spotify_url": track["external_urls"].get("spotify", ""),
+                })
 
-        offset += batch_size
+            offset += batch_size
 
-        if limit and len(songs) >= limit:
-            songs = songs[:limit]
-            break
+            if limit and len(songs) >= limit:
+                songs = songs[:limit]
+                break
 
-        # If we got fewer items than requested, we've reached the end
-        if len(items) < batch_size:
-            break
+            # If we got fewer items than requested, we've reached the end
+            if len(items) < batch_size:
+                break
+
+    except KeyboardInterrupt:
+        import sys
+        print(f"\n  Interrupted! Returning {len(songs)} songs fetched so far.",
+              file=sys.stderr)
 
     return songs
