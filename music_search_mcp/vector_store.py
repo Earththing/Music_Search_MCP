@@ -205,17 +205,34 @@ def search(query: str, n_results: int = 5, model_name: str = DEFAULT_MODEL) -> l
     return output
 
 
-def get_index_stats(model_name: str = DEFAULT_MODEL) -> dict:
+def get_index_stats(model_name: str = DEFAULT_MODEL, lightweight: bool = False) -> dict:
     """Get statistics about the vector index.
+
+    Args:
+        model_name: The model used for the collection.
+        lightweight: If True, skip loading the embedding model (faster, for status checks).
 
     Returns:
         Dict with keys: collection_size, model_name.
     """
-    collection = get_collection(model_name)
-    return {
-        "collection_size": collection.count(),
-        "model_name": model_name,
-    }
+    if lightweight:
+        # Just check the count without loading the embedding model
+        _CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+        client = chromadb.PersistentClient(path=str(_CHROMA_DIR))
+        try:
+            collection = client.get_collection(name=_COLLECTION_NAME)
+            return {
+                "collection_size": collection.count(),
+                "model_name": model_name,
+            }
+        except Exception:
+            return {"collection_size": 0, "model_name": model_name}
+    else:
+        collection = get_collection(model_name)
+        return {
+            "collection_size": collection.count(),
+            "model_name": model_name,
+        }
 
 
 def clear_index(model_name: str = DEFAULT_MODEL) -> int:

@@ -130,6 +130,149 @@ def _deduplicate_songs(songs: list[dict], source: str) -> list[dict]:
     return unique
 
 
+def _load_songs_from_store(source: str) -> tuple[list[dict], str]:
+    """Load songs from local store. Returns (songs, effective_source).
+
+    Falls back with a helpful error if the store hasn't been populated yet.
+    """
+    from .song_store import load_spotify_songs, load_lastfm_scrobbles
+
+    if source == "spotify":
+        data = load_spotify_songs()
+        if not data:
+            print("No Spotify songs stored locally yet.", file=sys.stderr)
+            print("Run 'music-search load spotify' first to fetch from the API.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Loaded {data['count']} Spotify songs from local store (fetched {data['fetched_at'][:10]})")
+        return data["songs"], "spotify"
+
+    elif source == "lastfm":
+        data = load_lastfm_scrobbles()
+        if not data:
+            print("No Last.fm scrobbles stored locally yet.", file=sys.stderr)
+            print("Run 'music-search load lastfm' first to fetch from the API.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Loaded {data['count']} Last.fm songs from local store (fetched {data['fetched_at'][:10]})")
+        return data["songs"], "lastfm"
+
+    elif source == "both":
+        spotify_data = load_spotify_songs()
+        lastfm_data = load_lastfm_scrobbles()
+
+        if not spotify_data and not lastfm_data:
+            print("No songs stored locally yet.", file=sys.stderr)
+            print("Run 'music-search load spotify' and/or 'music-search load lastfm' first.", file=sys.stderr)
+            sys.exit(1)
+
+        songs = []
+        if spotify_data:
+            print(f"Loaded {spotify_data['count']} Spotify songs (fetched {spotify_data['fetched_at'][:10]})")
+            songs.extend(spotify_data["songs"])
+
+        if lastfm_data:
+            print(f"Loaded {lastfm_data['count']} Last.fm songs (fetched {lastfm_data['fetched_at'][:10]})")
+            # Normalize Last.fm songs to have same artist field format
+            for s in lastfm_data["songs"]:
+                songs.append({**s, "artists": [s["artist"]]})
+
+        # Deduplicate across sources
+        unique = _deduplicate_songs(songs, "spotify")
+        print(f"  Combined: {len(unique)} unique songs")
+        return unique, "spotify"  # use spotify field mapping since we normalized
+
+    else:
+        print(f"Unknown source: {source}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_load(args):
+    """Fetch songs from Spotify/Last.fm APIs and save locally."""
+    source = args.source
+
+    if source in ("spotify", "all"):
+        from .config import get_spotify_config
+        from .spotify_client import fetch_liked_songs
+        from .song_store import save_spotify_songs
+
+        try:
+            get_spotify_config()
+        except ValueError as e:
+            print(f"Configuration error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        print("Fetching liked songs from Spotify...")
+        songs = fetch_liked_songs(limit=None)
+        filepath = save_spotify_songs(songs)
+        print(f"  Saved {len(songs)} liked songs to {filepath}")
+
+    if source in ("lastfm", "all"):
+        from .config import get_lastfm_config
+        from .lastfm_client import fetch_scrobbles, get_scrobble_stats
+        from .song_store import save_lastfm_scrobbles
+
+        try:
+            get_lastfm_config()
+        except ValueError as e:
+            print(f"Configuration error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        stats = get_scrobble_stats()
+        print(f"Last.fm account has {stats['total_scrobbles']:,} total scrobbles.")
+        print("Fetching scrobbles (this may take a while for large histories)...")
+        scrobbles = fetch_scrobbles(limit=None)
+        # Deduplicate before saving
+        unique = _deduplicate_songs(scrobbles, "lastfm")
+        print(f"  {len(scrobbles)} scrobbles -> {len(unique)} unique songs")
+        filepath = save_lastfm_scrobbles(unique)
+        print(f"  Saved {len(unique)} unique songs to {filepath}")
+
+    print("\nDone! You can now run 'music-search lyrics-enrich' without hitting the API again.")
+
+
+def cmd_status(args):
+    """Show what data is currently stored locally."""
+    from .song_store import get_store_info
+    from .lyrics_cache import get_cache_stats
+    from .vector_store import get_index_stats
+
+    print("=== Music Search MCP - Local Data Status ===\n")
+
+    # Song stores
+    info = get_store_info()
+    print("Song stores:")
+    if info["spotify"]:
+        print(f"  Spotify:  {info['spotify']['count']} liked songs (fetched {info['spotify']['fetched_at'][:10]})")
+    else:
+        print(f"  Spotify:  not loaded yet  (run 'music-search load spotify')")
+
+    if info["lastfm"]:
+        print(f"  Last.fm:  {info['lastfm']['count']} unique songs (fetched {info['lastfm']['fetched_at'][:10]})")
+    else:
+        print(f"  Last.fm:  not loaded yet  (run 'music-search load lastfm')")
+
+    # Lyrics cache
+    print()
+    cache_stats = get_cache_stats()
+    if cache_stats["total"] > 0:
+        print(f"Lyrics cache: {cache_stats['total']} songs")
+        print(f"  With lyrics:    {cache_stats['with_lyrics']}")
+        print(f"  Instrumental:   {cache_stats['instrumental']}")
+        print(f"  Not found:      {cache_stats['not_found']}")
+    else:
+        print(f"Lyrics cache: empty  (run 'music-search lyrics-enrich')")
+
+    # Vector index (lightweight check — no model loading)
+    print()
+    try:
+        idx_stats = get_index_stats(lightweight=True)
+        if idx_stats["collection_size"] > 0:
+            print(f"Vector index: {idx_stats['collection_size']} songs indexed")
+        else:
+            print(f"Vector index: empty  (run 'music-search index')")
+    except Exception:
+        print(f"Vector index: empty  (run 'music-search index')")
+
+
 def cmd_lyrics_enrich(args):
     """Fetch lyrics for your music library, with local caching."""
     from .lyrics_client import fetch_lyrics_for_songs
@@ -138,73 +281,20 @@ def cmd_lyrics_enrich(args):
     source = args.source
     force = args.force
     limit = args.limit
+    new_only = args.new
 
-    # Fetch songs from the chosen source
-    if source == "spotify":
-        from .config import get_spotify_config
-        from .spotify_client import fetch_liked_songs
-        try:
-            get_spotify_config()
-        except ValueError as e:
-            print(f"Configuration error: {e}", file=sys.stderr)
-            sys.exit(1)
-        print(f"Fetching liked songs from Spotify{f' (limit: {limit})' if limit else ''}...")
-        songs = fetch_liked_songs(limit=limit)
-
-    elif source == "lastfm":
-        from .config import get_lastfm_config
-        from .lastfm_client import fetch_scrobbles, get_scrobble_stats
-        try:
-            get_lastfm_config()
-        except ValueError as e:
-            print(f"Configuration error: {e}", file=sys.stderr)
-            sys.exit(1)
-        stats = get_scrobble_stats()
-        print(f"Last.fm account has {stats['total_scrobbles']:,} total scrobbles.")
-        print(f"Fetching scrobbles{f' (limit: {limit})' if limit else ''}...")
-        scrobbles = fetch_scrobbles(limit=limit)
-        # Deduplicate: scrobble history has many repeats of the same song
-        songs = _deduplicate_songs(scrobbles, source)
-        print(f"  {len(scrobbles)} scrobbles -> {len(songs)} unique songs")
-
-    elif source == "both":
-        from .config import get_spotify_config, get_lastfm_config
-        from .spotify_client import fetch_liked_songs
-        from .lastfm_client import fetch_scrobbles, get_scrobble_stats
-        try:
-            get_spotify_config()
-            get_lastfm_config()
-        except ValueError as e:
-            print(f"Configuration error: {e}", file=sys.stderr)
-            sys.exit(1)
-
-        # Fetch from both sources
-        print(f"Fetching liked songs from Spotify...")
-        spotify_songs = fetch_liked_songs(limit=limit)
-        print(f"  {len(spotify_songs)} liked songs")
-
-        stats = get_scrobble_stats()
-        print(f"Fetching scrobbles from Last.fm ({stats['total_scrobbles']:,} total)...")
-        scrobbles = fetch_scrobbles(limit=limit)
-        print(f"  {len(scrobbles)} scrobbles")
-
-        # Normalize Last.fm songs to have same artist field format for dedup
-        lastfm_normalized = []
-        for s in scrobbles:
-            lastfm_normalized.append({
-                **s,
-                "artists": [s["artist"]],  # match Spotify format
-            })
-
-        # Combine and deduplicate across both sources
-        combined = spotify_songs + lastfm_normalized
-        songs = _deduplicate_songs(combined, "spotify")  # use spotify format since we normalized
-        source = "spotify"  # use spotify field mapping from here on
-        print(f"  Combined: {len(songs)} unique songs")
-
-    else:
-        print(f"Unknown source: {source}", file=sys.stderr)
+    if limit is not None and new_only is not None:
+        print("Cannot use both -n/--limit and --new at the same time.", file=sys.stderr)
+        print("  -n N   = process N songs total (including cached)", file=sys.stderr)
+        print("  --new N = enrich N new uncached songs only", file=sys.stderr)
         sys.exit(1)
+
+    # Load songs from local store (no API calls!)
+    songs, source = _load_songs_from_store(source)
+
+    # Apply -n limit to the loaded songs (but not in --new mode, we filter later)
+    if limit and not new_only:
+        songs = songs[:limit]
 
     # Check cache stats
     cache_stats = get_cache_stats()
@@ -213,7 +303,31 @@ def cmd_lyrics_enrich(args):
               f"({cache_stats['with_lyrics']} with lyrics, "
               f"{cache_stats['not_found']} not found)")
 
-    print(f"Found {len(songs)} songs. Fetching lyrics from LRCLIB...\n")
+    # If --new mode, filter out already-cached songs before processing
+    if new_only and not force:
+        uncached_songs = []
+        skipped = 0
+        for song in songs:
+            artist = _get_artist_name(song, source)
+            cached = get_cached_lyrics(song["name"], artist)
+            if cached is None:
+                uncached_songs.append(song)
+            else:
+                skipped += 1
+        print(f"Skipping {skipped} already-cached songs, {len(uncached_songs)} new songs available.")
+        songs = uncached_songs
+        # Apply the --new limit to uncached songs only
+        if new_only and len(songs) > new_only:
+            songs = songs[:new_only]
+        if not songs:
+            print("No new songs to enrich. All songs are already cached!")
+            return
+
+    # Apply regular -n limit (in non --new mode)
+    # Note: in regular mode, limit was already applied during fetch
+
+    total_songs = len(songs)
+    print(f"Enriching {total_songs} songs with lyrics from LRCLIB...\n")
 
     enriched = []
     found = 0
@@ -225,7 +339,7 @@ def cmd_lyrics_enrich(args):
         artist = _get_artist_name(song, source)
         track_name = song["name"]
 
-        _progress(i, len(songs), f"Looking up: {track_name[:40]} - {artist[:20]}")
+        _progress(i, total_songs, f"Looking up: {track_name[:40]} - {artist[:20]}")
 
         # Check cache first (unless --force)
         cached = None if force else get_cached_lyrics(track_name, artist)
@@ -254,9 +368,9 @@ def cmd_lyrics_enrich(args):
                 found += 1
 
     print(f"\n\nResults:")
-    print(f"  Lyrics found:   {found}/{len(songs)}")
-    print(f"  Instrumental:   {instrumental}/{len(songs)}")
-    print(f"  Not found:      {len(songs) - found - instrumental}/{len(songs)}")
+    print(f"  Lyrics found:   {found}/{total_songs}")
+    print(f"  Instrumental:   {instrumental}/{total_songs}")
+    print(f"  Not found:      {total_songs - found - instrumental}/{total_songs}")
     print(f"  From cache:     {cached_hits}")
     print(f"  API lookups:    {api_lookups}")
 
@@ -355,6 +469,25 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
+    # load command
+    load_parser = subparsers.add_parser(
+        "load",
+        help="Fetch songs from Spotify/Last.fm and save locally",
+    )
+    load_parser.add_argument(
+        "source",
+        choices=["spotify", "lastfm", "all"],
+        help="Which service to fetch from: spotify, lastfm, or all",
+    )
+    load_parser.set_defaults(func=cmd_load)
+
+    # status command
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show what data is currently stored locally",
+    )
+    status_parser.set_defaults(func=cmd_status)
+
     # liked-songs command
     liked_parser = subparsers.add_parser("liked-songs", help="Fetch your Spotify liked songs")
     liked_parser.add_argument(
@@ -404,7 +537,14 @@ def main():
         "-n", "--limit",
         type=int,
         default=None,
-        help="Maximum number of songs to enrich (default: all)",
+        help="Maximum number of songs to process (default: all). Includes cached songs in the count.",
+    )
+    lyrics_enrich_parser.add_argument(
+        "--new",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Enrich N new (uncached) songs only. Skips already-cached songs and doesn't count them.",
     )
     lyrics_enrich_parser.add_argument(
         "--source",

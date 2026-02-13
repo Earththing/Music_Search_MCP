@@ -65,33 +65,39 @@ LASTFM_API_KEY=your_api_key_here
 LASTFM_USERNAME=your_lastfm_username
 ```
 
-### 5. Fetch your music data
+### 5. Load your music library
+
+Fetch your song lists from Spotify/Last.fm and save them locally. This only needs to be done once (or when you want to refresh):
 
 ```bash
-# Spotify liked songs
-music-search liked-songs          # Fetch all liked songs
-music-search liked-songs -n 20    # Fetch first 20
+music-search load spotify    # Fetch all liked songs from Spotify
+music-search load lastfm     # Fetch all scrobbles from Last.fm (auto-deduplicates)
+music-search load all        # Fetch from both services
 
-# Last.fm scrobble history
-music-search scrobbles            # Fetch all scrobbles (can be slow for large histories)
-music-search scrobbles -n 50      # Fetch most recent 50
-
-# Search for lyrics (no API key needed)
-music-search lyrics-search never gonna give you up rick astley
-music-search lyrics-search bohemian rhapsody --show-lyrics
-
-# Enrich songs with lyrics (cached between runs)
-music-search lyrics-enrich -n 20                  # Spotify liked songs (default)
-music-search lyrics-enrich --source lastfm -n 50  # Last.fm scrobbles
-music-search lyrics-enrich --source both -n 30    # Both sources combined
-music-search lyrics-enrich --force -n 10          # Re-fetch, ignoring cache
+music-search status          # See what data you have stored locally
 ```
 
-On first Spotify run, a browser window will open for login. The token is cached locally for subsequent runs.
+On first Spotify run, a browser window will open for login. The token is cached locally for subsequent runs. Song lists are saved to `data/` so all later commands work offline without hitting APIs again.
 
-Lyrics are cached in `data/lyrics_cache.json` so subsequent runs skip already-fetched songs.
+### 6. Enrich songs with lyrics
 
-### 6. Build the search index
+```bash
+# Enrich from your locally stored song lists (no API calls to Spotify/Last.fm!)
+music-search lyrics-enrich                           # Spotify liked songs (default)
+music-search lyrics-enrich --source lastfm           # Last.fm scrobbles
+music-search lyrics-enrich --source both             # Both sources combined
+music-search lyrics-enrich --new 50                  # Enrich 50 NEW songs only (skip cached)
+music-search lyrics-enrich -n 20                     # Process 20 songs total (including cached)
+music-search lyrics-enrich --force -n 10             # Re-fetch from LRCLIB, ignoring cache
+
+# Search LRCLIB directly (no API key needed)
+music-search lyrics-search never gonna give you up rick astley
+music-search lyrics-search bohemian rhapsody --show-lyrics
+```
+
+Lyrics are cached in `data/lyrics_cache.json` so subsequent runs skip already-fetched songs. Use `--new N` to only enrich songs that haven't been looked up yet.
+
+### 7. Build the search index
 
 Once you have lyrics cached, build the vector search index:
 
@@ -104,7 +110,7 @@ The first run downloads the embedding model (~80MB). Subsequent runs use the cac
 
 If you have an NVIDIA GPU with CUDA, embeddings will automatically run on GPU. Otherwise it falls back to CPU (still fast for typical library sizes).
 
-### 7. Search your library
+### 8. Search your library
 
 Search with natural language -- describe the song however you remember it:
 
@@ -128,12 +134,15 @@ music_search_mcp/
   lastfm_client.py    # Last.fm API client (scrobble history)
   lyrics_client.py    # LRCLIB lyrics fetcher (free, no API key)
   lyrics_cache.py     # Local JSON cache for fetched lyrics
+  song_store.py       # Local JSON storage for song lists (avoid re-fetching)
   vector_store.py     # ChromaDB vector store for semantic search
   cli.py              # CLI entry point for testing
 
 data/
-  lyrics_cache.json   # Cached lyrics (auto-created, gitignored)
-  chroma_db/          # Vector database (auto-created, gitignored)
+  spotify_songs.json    # Liked songs from Spotify (auto-created, gitignored)
+  lastfm_scrobbles.json # Unique scrobbles from Last.fm (auto-created, gitignored)
+  lyrics_cache.json     # Cached lyrics (auto-created, gitignored)
+  chroma_db/            # Vector database (auto-created, gitignored)
 ```
 
 **Key design decisions:**
@@ -141,6 +150,7 @@ data/
 - **Last.fm API** accessed directly via `requests` (simple API key auth, no OAuth needed)
 - **LRCLIB** for lyrics -- free, no API key, no rate limits, returns full plain-text lyrics
 - **httpx** used for LRCLIB (better TLS compatibility than urllib3/requests on some systems)
+- **Local song store** -- song lists saved as JSON after first API fetch; all subsequent commands (enrich, index, search) work offline
 - **Lyrics cache** -- JSON file so songs don't need re-fetching between runs; shared across sources
 - **ChromaDB** for local persistent vector storage with cosine similarity
 - **sentence-transformers** (`all-MiniLM-L6-v2`) for embeddings -- ~80MB model, fast on CPU, auto-uses GPU/CUDA if available
