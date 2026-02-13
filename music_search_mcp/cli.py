@@ -99,13 +99,48 @@ def cmd_lyrics_search(args):
         print()
 
 
+def _display_width(text: str) -> int:
+    """Calculate the actual display width of a string in terminal columns.
+
+    CJK and other fullwidth characters take 2 columns, while most Latin
+    characters take 1. This prevents line wrapping when printing progress.
+    """
+    import unicodedata
+    width = 0
+    for ch in text:
+        eaw = unicodedata.east_asian_width(ch)
+        width += 2 if eaw in ("W", "F") else 1
+    return width
+
+
+def _truncate_to_width(text: str, max_width: int) -> str:
+    """Truncate a string to fit within a given display width.
+
+    Accounts for wide (CJK) characters that occupy 2 terminal columns.
+    Returns the string padded with spaces to exactly max_width columns.
+    """
+    import unicodedata
+    current_width = 0
+    chars = []
+    for ch in text:
+        eaw = unicodedata.east_asian_width(ch)
+        ch_width = 2 if eaw in ("W", "F") else 1
+        if current_width + ch_width > max_width:
+            break
+        chars.append(ch)
+        current_width += ch_width
+    # Pad with spaces to fill remaining terminal columns
+    padding = max_width - current_width
+    return "".join(chars) + " " * padding
+
+
 def _progress(current: int, total: int, message: str) -> None:
     """Write a progress line that fully clears the previous one."""
     import shutil
     width = shutil.get_terminal_size().columns - 1
     line = f"  [{current}/{total}] {message}"
-    # Truncate if line is longer than terminal, then pad to fill the rest
-    sys.stdout.write(f"\r{line[:width]:<{width}}")
+    # Truncate accounting for wide chars, pad to fill terminal width
+    sys.stdout.write(f"\r{_truncate_to_width(line, width)}")
     sys.stdout.flush()
 
 
