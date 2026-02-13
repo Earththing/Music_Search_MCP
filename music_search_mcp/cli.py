@@ -99,11 +99,13 @@ def cmd_lyrics_search(args):
         print()
 
 
-def _progress(current: int, total: int, message: str, width: int = 80) -> None:
+def _progress(current: int, total: int, message: str) -> None:
     """Write a progress line that fully clears the previous one."""
+    import shutil
+    width = shutil.get_terminal_size().columns - 1
     line = f"  [{current}/{total}] {message}"
-    # Pad with spaces to overwrite any leftover characters from previous line
-    sys.stdout.write(f"\r{line:<{width}}")
+    # Truncate if line is longer than terminal, then pad to fill the rest
+    sys.stdout.write(f"\r{line[:width]:<{width}}")
     sys.stdout.flush()
 
 
