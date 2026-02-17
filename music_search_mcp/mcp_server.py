@@ -64,12 +64,21 @@ def search_music(query: str, n_results: int = 5) -> str:
         )
 
     # Format results as readable text for Claude to present conversationally
+    from urllib.parse import quote
+
     lines = [f'Found {len(results)} results for "{query}":\n']
     for i, r in enumerate(results, 1):
         score_pct = r["score"] * 100
         lines.append(f"{i}. {r['track_name']} -- {r['artist_name']}")
         lines.append(f"   Album: {r['album']}")
         lines.append(f"   Match: {score_pct:.1f}%")
+
+        # Spotify link (direct URL or search fallback)
+        spotify_url = r.get("spotify_url", "")
+        if not spotify_url:
+            search_q = quote(f"{r['track_name']} {r['artist_name']}")
+            spotify_url = f"https://open.spotify.com/search/{search_q}"
+        lines.append(f"   Spotify: {spotify_url}")
         lines.append("")
 
     return "\n".join(lines)

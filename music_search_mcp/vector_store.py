@@ -176,6 +176,13 @@ def index_songs(songs: list[dict], model_name: str = DEFAULT_MODEL) -> dict:
             "album": song.get("album", ""),
             "instrumental": str(song.get("instrumental", False)),
             "has_lyrics": str(bool(song.get("plain_lyrics"))),
+            "spotify_url": song.get("spotify_url", ""),
+            "lastfm_url": song.get("lastfm_url", ""),
+            # Richer Spotify fields
+            "popularity": song.get("popularity", 0),
+            "explicit": str(song.get("explicit", False)),
+            "release_date": song.get("release_date", ""),
+            "duration_ms": song.get("duration_ms", 0),
         })
         ids.append(song_id)
 
@@ -250,6 +257,8 @@ def search(query: str, n_results: int = 5, model_name: str = DEFAULT_MODEL,
             "distance": distance,
             "score": 1.0 - distance,  # Convert cosine distance to similarity
             "document_preview": document[:200] + "..." if len(document) > 200 else document,
+            "spotify_url": metadata.get("spotify_url", ""),
+            "lastfm_url": metadata.get("lastfm_url", ""),
         })
 
     return output
