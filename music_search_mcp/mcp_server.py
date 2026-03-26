@@ -155,6 +155,92 @@ def library_status() -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+def query_library(sql: str) -> str:
+    """Run a read-only SQL query against the music library database.
+
+    The database contains a 'songs' table with all your music from Spotify
+    and Last.fm, plus a 'lyrics_fts' FTS5 table for full-text lyrics search.
+
+    Songs table columns:
+        id, track_name, artist_name, all_artists, album,
+        in_spotify (bool), in_lastfm (bool), spotify_id, spotify_url, lastfm_url,
+        added_at (ISO date, Spotify only), duration_ms, popularity (0-100),
+        explicit (bool), release_date, track_number, disc_number,
+        genres (JSON array), artist_ids (JSON array),
+        user_playcount (Last.fm), global_listeners, global_playcount,
+        tags (JSON array of Last.fm tags), loved (bool),
+        lyrics_found (bool), instrumental (bool), lyrics_source,
+        plain_lyrics (text), synced_lyrics (text)
+
+    Full-text lyrics search example:
+        SELECT s.* FROM lyrics_fts f JOIN songs s ON s.id = f.rowid
+        WHERE lyrics_fts MATCH 'love rain'
+
+    Args:
+        sql: A SELECT query. Only read operations are allowed.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path(__file__).parent.parent / "data" / "music_library.db"
+
+    if not db_path.exists():
+        return (
+            "Database not found. Export it first by running:\n"
+            "  music-search export-db"
+        )
+
+    # Only allow read operations
+    stripped = sql.strip().rstrip(";").strip()
+    first_word = stripped.split()[0].upper() if stripped else ""
+    if first_word not in ("SELECT", "WITH", "EXPLAIN", "PRAGMA"):
+        return "Only SELECT, WITH, EXPLAIN, and PRAGMA queries are allowed."
+
+    logger.info(f"SQL query: {sql!r}")
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(sql)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        conn.close()
+    except sqlite3.Error as e:
+        return f"SQL error: {e}"
+
+    if not rows:
+        return "No results."
+
+    # Format as readable text, capping output to avoid overwhelming context
+    max_rows = 200
+    truncated = len(rows) > max_rows
+    rows = rows[:max_rows]
+
+    lines = [f"Results: {len(rows)}{' (truncated)' if truncated else ''} rows\n"]
+    lines.append(" | ".join(columns))
+    lines.append("-" * min(len(lines[-1]), 120))
+
+    for row in rows:
+        values = []
+        for col in columns:
+            val = row[col]
+            if val is None:
+                values.append("")
+            elif col == "plain_lyrics" and isinstance(val, str) and len(val) > 80:
+                values.append(val[:77] + "...")
+            elif col == "synced_lyrics" and isinstance(val, str) and len(val) > 80:
+                values.append(val[:77] + "...")
+            else:
+                values.append(str(val))
+        lines.append(" | ".join(values))
+
+    if truncated:
+        lines.append(f"\n... truncated to {max_rows} rows. Use LIMIT or narrow your query.")
+
+    return "\n".join(lines)
+
+
 def main():
     """Entry point for the MCP server."""
     logger.info("Starting Music Search MCP server (stdio transport)...")
