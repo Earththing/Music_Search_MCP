@@ -159,23 +159,46 @@ def library_status() -> str:
 def query_library(sql: str) -> str:
     """Run a read-only SQL query against the music library database.
 
-    The database contains a 'songs' table with all your music from Spotify
-    and Last.fm, plus a 'lyrics_fts' FTS5 table for full-text lyrics search.
+    The database contains these tables:
 
-    Songs table columns:
+    **songs** — one row per unique song (merged from Spotify + Last.fm):
         id, track_name, artist_name, all_artists, album,
         in_spotify (bool), in_lastfm (bool), spotify_id, spotify_url, lastfm_url,
-        added_at (ISO date, Spotify only), duration_ms, popularity (0-100),
+        added_at (ISO date, Spotify liked-date), duration_ms, popularity (0-100),
         explicit (bool), release_date, track_number, disc_number,
         genres (JSON array), artist_ids (JSON array),
-        user_playcount (Last.fm), global_listeners, global_playcount,
+        user_playcount (Last.fm total plays), global_listeners, global_playcount,
         tags (JSON array of Last.fm tags), loved (bool),
+        first_scrobbled_at (ISO UTC, earliest Last.fm play),
+        last_scrobbled_at (ISO UTC, most recent Last.fm play),
         lyrics_found (bool), instrumental (bool), lyrics_source,
         plain_lyrics (text), synced_lyrics (text)
 
-    Full-text lyrics search example:
+    **scrobbles** — every individual Last.fm play event:
+        id, song_id (FK to songs.id), scrobbled_at (ISO UTC), timestamp (Unix epoch)
+        Use this for listening history, trends, play counts by time period, etc.
+
+    **lyrics_fts** — FTS5 full-text search on lyrics:
         SELECT s.* FROM lyrics_fts f JOIN songs s ON s.id = f.rowid
         WHERE lyrics_fts MATCH 'love rain'
+
+    Example queries:
+        -- Oldest Last.fm songs not on Spotify:
+        SELECT track_name, artist_name, first_scrobbled_at
+        FROM songs WHERE in_lastfm = 1 AND in_spotify = 0
+        ORDER BY first_scrobbled_at LIMIT 200
+
+        -- What was I listening to in December 2019?
+        SELECT s.track_name, s.artist_name, sc.scrobbled_at
+        FROM scrobbles sc JOIN songs s ON s.id = sc.song_id
+        WHERE sc.scrobbled_at LIKE '2019-12%'
+        ORDER BY sc.timestamp
+
+        -- Most played songs in a given month:
+        SELECT s.track_name, s.artist_name, COUNT(*) as plays
+        FROM scrobbles sc JOIN songs s ON s.id = sc.song_id
+        WHERE sc.scrobbled_at LIKE '2024-01%'
+        GROUP BY sc.song_id ORDER BY plays DESC LIMIT 20
 
     Args:
         sql: A SELECT query. Only read operations are allowed.

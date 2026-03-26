@@ -36,7 +36,7 @@ def export_to_sqlite(db_path: Path | None = None) -> dict:
     Returns:
         Dict with export stats: songs_exported, lyrics_indexed, db_path.
     """
-    from .song_store import load_spotify_songs, load_lastfm_scrobbles
+    from .song_store import load_spotify_songs, load_lastfm_scrobbles, load_scrobble_history
     from .lyrics_cache import _load_cache, _make_key
 
     db_path = db_path or _DEFAULT_DB
@@ -46,6 +46,7 @@ def export_to_sqlite(db_path: Path | None = None) -> dict:
     spotify_data = load_spotify_songs()
     lastfm_data = load_lastfm_scrobbles()
     lyrics_cache = _load_cache()
+    scrobble_history = load_scrobble_history()
 
     # Build unified song list with provenance
     songs = _build_unified_songs(spotify_data, lastfm_data, lyrics_cache, _make_key)
@@ -56,6 +57,7 @@ def export_to_sqlite(db_path: Path | None = None) -> dict:
         _create_tables(conn)
         songs_count = _insert_songs(conn, songs)
         lyrics_count = _insert_lyrics_fts(conn, songs)
+        scrobble_count = _insert_scrobbles(conn, scrobble_history, _make_key)
         conn.commit()
     finally:
         conn.close()
@@ -63,6 +65,7 @@ def export_to_sqlite(db_path: Path | None = None) -> dict:
     return {
         "songs_exported": songs_count,
         "lyrics_indexed": lyrics_count,
+        "scrobbles_exported": scrobble_count,
         "db_path": str(db_path),
     }
 
@@ -217,6 +220,8 @@ def _create_tables(conn: sqlite3.Connection):
             global_playcount INTEGER,
             tags TEXT DEFAULT '[]',          -- JSON array
             loved BOOLEAN,
+            first_scrobbled_at TEXT,         -- ISO 8601 UTC (earliest play)
+            last_scrobbled_at TEXT,          -- ISO 8601 UTC (most recent play)
 
             -- Lyrics
             lyrics_found BOOLEAN DEFAULT 0,
@@ -231,6 +236,18 @@ def _create_tables(conn: sqlite3.Connection):
         CREATE INDEX idx_songs_playcount ON songs(user_playcount);
         CREATE INDEX idx_songs_popularity ON songs(popularity);
         CREATE INDEX idx_songs_provenance ON songs(in_spotify, in_lastfm);
+
+        -- Scrobble history (every individual play event)
+        DROP TABLE IF EXISTS scrobbles;
+        CREATE TABLE scrobbles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            song_id INTEGER NOT NULL REFERENCES songs(id),
+            scrobbled_at TEXT NOT NULL,  -- ISO 8601 UTC
+            timestamp INTEGER NOT NULL   -- Unix epoch
+        );
+
+        CREATE INDEX idx_scrobbles_song ON scrobbles(song_id);
+        CREATE INDEX idx_scrobbles_time ON scrobbles(timestamp);
 
         -- FTS5 virtual table for full-text lyrics search
         CREATE VIRTUAL TABLE lyrics_fts USING fts5(
@@ -286,3 +303,57 @@ def _insert_lyrics_fts(conn: sqlite3.Connection, songs: list[dict]) -> int:
         "SELECT COUNT(*) FROM songs WHERE plain_lyrics IS NOT NULL"
     )
     return cursor.fetchone()[0]
+
+
+def _insert_scrobbles(conn: sqlite3.Connection, scrobble_history: dict | None,
+                      make_key) -> int:
+    """Insert scrobble history and update songs with first/last scrobbled dates."""
+    if not scrobble_history:
+        return 0
+
+    scrobbles = scrobble_history.get("scrobbles", [])
+    if not scrobbles:
+        return 0
+
+    # Build song key -> id lookup from the songs table
+    cursor = conn.execute("SELECT id, track_name, artist_name FROM songs")
+    key_to_id = {}
+    for row in cursor:
+        key = make_key(row[1], row[2])
+        key_to_id[key] = row[0]
+
+    # Insert scrobble rows and track first/last per song
+    from datetime import datetime, timezone
+
+    rows = []
+    song_dates: dict[int, list[int]] = {}  # song_id -> list of timestamps
+
+    for s in scrobbles:
+        key = make_key(s["name"], s.get("artist", ""))
+        song_id = key_to_id.get(key)
+        if song_id is None:
+            continue
+
+        ts = int(s["timestamp"])
+        iso = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows.append((song_id, iso, ts))
+
+        song_dates.setdefault(song_id, []).append(ts)
+
+    conn.executemany(
+        "INSERT INTO scrobbles (song_id, scrobbled_at, timestamp) VALUES (?, ?, ?)",
+        rows,
+    )
+
+    # Update songs with first/last scrobbled dates
+    for song_id, timestamps in song_dates.items():
+        first_ts = min(timestamps)
+        last_ts = max(timestamps)
+        first_iso = datetime.fromtimestamp(first_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        last_iso = datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute(
+            "UPDATE songs SET first_scrobbled_at = ?, last_scrobbled_at = ? WHERE id = ?",
+            (first_iso, last_iso, song_id),
+        )
+
+    return len(rows)

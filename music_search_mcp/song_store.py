@@ -16,6 +16,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 _DATA_DIR = _PROJECT_ROOT / "data"
 _SPOTIFY_FILE = _DATA_DIR / "spotify_songs.json"
 _LASTFM_FILE = _DATA_DIR / "lastfm_scrobbles.json"
+_LASTFM_HISTORY_FILE = _DATA_DIR / "lastfm_scrobble_history.json"
 
 
 def _load_store(filepath: Path) -> dict | None:
@@ -236,3 +237,76 @@ def get_store_info() -> dict:
         }
 
     return info
+
+
+# --- Raw scrobble history (every play event with timestamp) ---
+
+
+def save_scrobble_history(scrobbles: list[dict]) -> tuple[Path, int]:
+    """Save raw scrobbles to the history file, merging with existing data.
+
+    Each scrobble is stored as (name, artist, album, timestamp). Duplicates
+    (same track + artist + timestamp) are ignored during merge.
+
+    Args:
+        scrobbles: Raw scrobble dicts from fetch_scrobbles() — NOT deduplicated.
+
+    Returns:
+        (filepath, new_count) — path to the saved file and number of new entries added.
+    """
+    # Normalise incoming scrobbles to a compact format
+    new_entries = []
+    for s in scrobbles:
+        ts = s.get("timestamp")
+        if ts is None:  # skip "now playing"
+            continue
+        new_entries.append({
+            "name": s["name"],
+            "artist": s.get("artist", ""),
+            "album": s.get("album", ""),
+            "timestamp": int(ts),
+        })
+
+    # Load existing history
+    existing_data = _load_store(_LASTFM_HISTORY_FILE)
+    existing_entries = existing_data.get("scrobbles", []) if existing_data else []
+
+    # Build set of existing keys for dedup: (name_lower, artist_lower, timestamp)
+    existing_keys = set()
+    for e in existing_entries:
+        existing_keys.add((
+            e["name"].strip().lower(),
+            e["artist"].strip().lower(),
+            e["timestamp"],
+        ))
+
+    # Merge
+    new_count = 0
+    merged = list(existing_entries)
+    for e in new_entries:
+        key = (e["name"].strip().lower(), e["artist"].strip().lower(), e["timestamp"])
+        if key not in existing_keys:
+            merged.append(e)
+            existing_keys.add(key)
+            new_count += 1
+
+    # Sort by timestamp (oldest first) for clean storage
+    merged.sort(key=lambda x: x["timestamp"])
+
+    data = {
+        "source": "lastfm_history",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(merged),
+        "scrobbles": merged,
+    }
+    _save_store(_LASTFM_HISTORY_FILE, data)
+    return _LASTFM_HISTORY_FILE, new_count
+
+
+def load_scrobble_history() -> dict | None:
+    """Load raw scrobble history from local store.
+
+    Returns:
+        Dict with keys (source, fetched_at, count, scrobbles), or None.
+    """
+    return _load_store(_LASTFM_HISTORY_FILE)

@@ -296,7 +296,7 @@ def _load_lastfm(full: bool = False):
     from .config import get_lastfm_config
     from .lastfm_client import fetch_scrobbles, get_scrobble_stats
     from .song_store import (save_lastfm_scrobbles, get_lastfm_latest_timestamp,
-                             merge_lastfm_scrobbles)
+                             merge_lastfm_scrobbles, save_scrobble_history)
 
     try:
         get_lastfm_config()
@@ -311,6 +311,9 @@ def _load_lastfm(full: bool = False):
         print("Fetching ALL scrobbles (full reload — this may take a while)...")
         print("Press Ctrl+C to stop early — what's been fetched so far will be saved.\n")
         scrobbles = fetch_scrobbles(limit=None)
+        # Save raw scrobble history (every play event with timestamp)
+        _, hist_new = save_scrobble_history(scrobbles)
+        print(f"  Scrobble history: {hist_new} new play events recorded")
         unique = _deduplicate_songs(scrobbles, "lastfm")
         print(f"  {len(scrobbles)} scrobbles -> {len(unique)} unique songs")
         filepath = save_lastfm_scrobbles(unique)
@@ -323,6 +326,9 @@ def _load_lastfm(full: bool = False):
             print(f"Fetching scrobbles since {last_date} (incremental)...")
             scrobbles = fetch_scrobbles(limit=None, since_timestamp=latest_ts)
             if scrobbles:
+                # Save raw scrobble history
+                _, hist_new = save_scrobble_history(scrobbles)
+                print(f"  Scrobble history: {hist_new} new play events recorded")
                 new_unique = _deduplicate_songs(scrobbles, "lastfm")
                 merged, new_count = merge_lastfm_scrobbles(new_unique)
                 filepath = save_lastfm_scrobbles(merged)
@@ -334,6 +340,9 @@ def _load_lastfm(full: bool = False):
             print("Fetching scrobbles (first load — this may take a while)...")
             print("Press Ctrl+C to stop early — what's been fetched so far will be saved.\n")
             scrobbles = fetch_scrobbles(limit=None)
+            # Save raw scrobble history
+            _, hist_new = save_scrobble_history(scrobbles)
+            print(f"  Scrobble history: {hist_new} new play events recorded")
             unique = _deduplicate_songs(scrobbles, "lastfm")
             print(f"  {len(scrobbles)} scrobbles -> {len(unique)} unique songs")
             filepath = save_lastfm_scrobbles(unique)
@@ -1196,7 +1205,8 @@ def cmd_refresh(args):
 
     from .sqlite_export import export_to_sqlite
     stats = export_to_sqlite()
-    print(f"  Songs: {stats['songs_exported']:,}  |  Lyrics indexed: {stats['lyrics_indexed']:,}")
+    print(f"  Songs: {stats['songs_exported']:,}  |  Scrobbles: {stats.get('scrobbles_exported', 0):,}"
+          f"  |  Lyrics indexed: {stats['lyrics_indexed']:,}")
     print(f"  Database: {stats['db_path']}")
 
     # Final summary
@@ -1224,6 +1234,7 @@ def cmd_export_db(args):
 
     print(f"\nExport complete:")
     print(f"  Songs:          {stats['songs_exported']:,}")
+    print(f"  Scrobbles:      {stats.get('scrobbles_exported', 0):,} play events")
     print(f"  Lyrics indexed: {stats['lyrics_indexed']:,} (searchable via FTS5)")
     print(f"  Database:       {stats['db_path']}")
     print(f"\nExplore with:")
