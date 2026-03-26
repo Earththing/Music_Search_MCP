@@ -17,6 +17,7 @@ from pathlib import Path
 # _get_embedding_function() during model loading.
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")  # avoids fork-safety warning
 
 _PROJECT_ROOT = Path(__file__).parent.parent
@@ -27,12 +28,17 @@ _COLLECTION_NAME = "music_library"
 # ~80MB download on first run, cached locally after that
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
+# Cached embedding functions keyed by model name, so the ~8s model load
+# only happens once per process rather than on every search/index call.
+_embedding_cache: dict[str, SentenceTransformerEmbeddingFunction] = {}
+
 
 def _get_embedding_function(model_name: str = DEFAULT_MODEL, progress_callback=None,
                             suppress_stderr: bool = True):
-    """Create an embedding function using sentence-transformers.
+    """Create or return a cached embedding function using sentence-transformers.
 
     The model automatically uses GPU (CUDA) if available, otherwise CPU.
+    Results are cached so the expensive model load only happens once.
 
     Args:
         model_name: Name of the sentence-transformer model.
@@ -41,6 +47,9 @@ def _get_embedding_function(model_name: str = DEFAULT_MODEL, progress_callback=N
             noisy library output (safetensors LOAD REPORT, HF Hub warnings).
             Set to False when stderr is needed for diagnostics (e.g. MCP server).
     """
+    if model_name in _embedding_cache:
+        return _embedding_cache[model_name]
+
     import sys
     import io
 
@@ -62,7 +71,18 @@ def _get_embedding_function(model_name: str = DEFAULT_MODEL, progress_callback=N
 
     if progress_callback:
         progress_callback("Embedding model loaded.")
+
+    _embedding_cache[model_name] = ef
     return ef
+
+
+def warmup(model_name: str = DEFAULT_MODEL, suppress_stderr: bool = False):
+    """Pre-load the embedding model so the first search is fast.
+
+    Call this at server startup to avoid the ~8s model load penalty
+    on the first MCP tool call.
+    """
+    _get_embedding_function(model_name, suppress_stderr=suppress_stderr)
 
 
 def get_collection(model_name: str = DEFAULT_MODEL, progress_callback=None,

@@ -158,6 +158,17 @@ def library_status() -> str:
 def main():
     """Entry point for the MCP server."""
     logger.info("Starting Music Search MCP server (stdio transport)...")
+
+    # Eagerly load the embedding model so the first MCP tool call doesn't
+    # timeout waiting for the ~8s model load.
+    from . import vector_store
+    logger.info("Warming up embedding model...")
+    try:
+        vector_store.warmup(suppress_stderr=False)
+        logger.info("Embedding model ready.")
+    except Exception as e:
+        logger.warning(f"Model warmup failed (search will retry on first call): {e}")
+
     mcp.run(transport="stdio")
 
 
