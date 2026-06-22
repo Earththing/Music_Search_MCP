@@ -6,6 +6,8 @@ HTTP 429 with Retry-After header when exceeded. Spotipy handles basic
 retries internally; we also throttle via the shared RateLimiter.
 """
 
+import logging
+import sys
 import time
 from pathlib import Path
 
@@ -16,8 +18,21 @@ from spotipy.exceptions import SpotifyException
 from .config import get_spotify_config
 from .rate_limiter import SPOTIFY_LIMITER
 
+logger = logging.getLogger("music-search-mcp")
+
 # Cache token in project root so re-auth isn't needed every run
 _TOKEN_CACHE = Path(__file__).parent.parent / ".spotify_token_cache"
+
+
+def _make_auth_manager(config: dict) -> SpotifyOAuth:
+    return SpotifyOAuth(
+        client_id=config["client_id"],
+        client_secret=config["client_secret"],
+        redirect_uri=config["redirect_uri"],
+        scope="user-library-read",
+        cache_path=str(_TOKEN_CACHE),
+        open_browser=True,
+    )
 
 
 def get_spotify_client() -> spotipy.Spotify:
@@ -27,15 +42,20 @@ def get_spotify_client() -> spotipy.Spotify:
     The token is cached locally for subsequent runs.
     """
     config = get_spotify_config()
+    auth_manager = _make_auth_manager(config)
 
-    auth_manager = SpotifyOAuth(
-        client_id=config["client_id"],
-        client_secret=config["client_secret"],
-        redirect_uri=config["redirect_uri"],
-        scope="user-library-read",
-        cache_path=str(_TOKEN_CACHE),
-        open_browser=True,
-    )
+    token_info = auth_manager.cache_handler.get_cached_token()
+    if token_info:
+        try:
+            auth_manager.validate_token(token_info)
+        except spotipy.oauth2.SpotifyOauthError:
+            # Refresh token expired (Spotify enforces 6-month expiry
+            # starting July 2026). Delete the stale cache and re-auth.
+            logger.warning("Refresh token expired — re-authenticating.")
+            print("Spotify refresh token expired. Re-opening browser to sign in...",
+                  file=sys.stderr)
+            _TOKEN_CACHE.unlink(missing_ok=True)
+            auth_manager = _make_auth_manager(config)
 
     # retries=3 tells spotipy to retry on 429/5xx up to 3 times
     return spotipy.Spotify(auth_manager=auth_manager, retries=3)
