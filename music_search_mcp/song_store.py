@@ -16,6 +16,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 _DATA_DIR = _PROJECT_ROOT / "data"
 _SPOTIFY_FILE = _DATA_DIR / "spotify_songs.json"
 _LASTFM_FILE = _DATA_DIR / "lastfm_scrobbles.json"
+_LASTFM_HISTORY_FILE = _DATA_DIR / "lastfm_scrobble_history.json"
 
 
 def _load_store(filepath: Path) -> dict | None:
@@ -59,20 +60,138 @@ def save_spotify_songs(songs: list[dict]) -> Path:
 def save_lastfm_scrobbles(scrobbles: list[dict]) -> Path:
     """Save Last.fm scrobbles to local store.
 
+    Merges new scrobbles with any existing ones (deduplication by name+artist
+    is handled by the caller). Preserves the latest_timestamp for incremental
+    loading.
+
     Args:
         scrobbles: List of unique (deduplicated) scrobble dicts.
 
     Returns:
         Path to the saved file.
     """
+    # Find the latest timestamp from the new scrobbles
+    latest_ts = _find_latest_timestamp(scrobbles)
+
     data = {
         "source": "lastfm",
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "count": len(scrobbles),
         "songs": scrobbles,
+        "latest_timestamp": latest_ts,
     }
     _save_store(_LASTFM_FILE, data)
     return _LASTFM_FILE
+
+
+def _find_latest_timestamp(scrobbles: list[dict]) -> int | None:
+    """Find the most recent Unix timestamp among scrobbles."""
+    latest = None
+    for s in scrobbles:
+        ts = s.get("timestamp")
+        if ts is not None:
+            ts_int = int(ts)
+            if latest is None or ts_int > latest:
+                latest = ts_int
+    return latest
+
+
+def get_lastfm_latest_timestamp() -> int | None:
+    """Get the latest scrobble timestamp from the stored Last.fm data.
+
+    Used for incremental loading — pass this to fetch_scrobbles(since_timestamp=...)
+    to only fetch new scrobbles.
+
+    Returns:
+        Unix timestamp of the most recent scrobble, or None if no data stored.
+    """
+    data = _load_store(_LASTFM_FILE)
+    if not data:
+        return None
+    # Try the stored field first (set by save_lastfm_scrobbles)
+    ts = data.get("latest_timestamp")
+    if ts is not None:
+        return ts
+    # Fall back to scanning songs (for stores saved before this field existed)
+    return _find_latest_timestamp(data.get("songs", []))
+
+
+def merge_lastfm_scrobbles(new_scrobbles: list[dict]) -> tuple[list[dict], int]:
+    """Merge new scrobbles into the existing Last.fm store.
+
+    Deduplicates by normalized track+artist key. Returns the merged list
+    and the count of genuinely new songs added.
+
+    Args:
+        new_scrobbles: Newly fetched scrobble dicts (already deduplicated).
+
+    Returns:
+        (merged_songs, new_count) — full merged list and how many were new.
+    """
+    existing_data = _load_store(_LASTFM_FILE)
+    if not existing_data:
+        return new_scrobbles, len(new_scrobbles)
+
+    existing_songs = existing_data.get("songs", [])
+
+    # Build a set of existing keys for fast lookup
+    existing_keys = set()
+    for s in existing_songs:
+        key = f"{s['name'].strip().lower()}||{s.get('artist', '').strip().lower()}"
+        existing_keys.add(key)
+
+    # Add only genuinely new songs
+    new_count = 0
+    merged = list(existing_songs)
+    for s in new_scrobbles:
+        key = f"{s['name'].strip().lower()}||{s.get('artist', '').strip().lower()}"
+        if key not in existing_keys:
+            merged.append(s)
+            existing_keys.add(key)
+            new_count += 1
+
+    return merged, new_count
+
+
+def get_spotify_known_ids() -> set[str]:
+    """Get the set of Spotify track IDs already stored locally.
+
+    Used for incremental loading — pass these to fetch_liked_songs(known_ids=...)
+    so it can stop early when it hits songs we already have.
+
+    Returns:
+        Set of Spotify track ID strings. Empty set if no data stored.
+    """
+    data = _load_store(_SPOTIFY_FILE)
+    if not data:
+        return set()
+    return {s["id"] for s in data.get("songs", []) if "id" in s}
+
+
+def merge_spotify_songs(new_songs: list[dict]) -> tuple[list[dict], int]:
+    """Merge new Spotify songs into the existing store.
+
+    New songs are prepended (since Spotify returns most-recently-liked first).
+    Deduplicates by track ID.
+
+    Args:
+        new_songs: Newly fetched song dicts.
+
+    Returns:
+        (merged_songs, new_count) — full merged list and how many were new.
+    """
+    existing_data = _load_store(_SPOTIFY_FILE)
+    if not existing_data:
+        return new_songs, len(new_songs)
+
+    existing_songs = existing_data.get("songs", [])
+    existing_ids = {s["id"] for s in existing_songs if "id" in s}
+
+    # New songs go first (most recently liked), then existing ones
+    genuinely_new = [s for s in new_songs if s["id"] not in existing_ids]
+    merged = genuinely_new + existing_songs
+
+    return merged, len(genuinely_new)
 
 
 def load_spotify_songs() -> dict | None:
@@ -118,3 +237,76 @@ def get_store_info() -> dict:
         }
 
     return info
+
+
+# --- Raw scrobble history (every play event with timestamp) ---
+
+
+def save_scrobble_history(scrobbles: list[dict]) -> tuple[Path, int]:
+    """Save raw scrobbles to the history file, merging with existing data.
+
+    Each scrobble is stored as (name, artist, album, timestamp). Duplicates
+    (same track + artist + timestamp) are ignored during merge.
+
+    Args:
+        scrobbles: Raw scrobble dicts from fetch_scrobbles() — NOT deduplicated.
+
+    Returns:
+        (filepath, new_count) — path to the saved file and number of new entries added.
+    """
+    # Normalise incoming scrobbles to a compact format
+    new_entries = []
+    for s in scrobbles:
+        ts = s.get("timestamp")
+        if ts is None:  # skip "now playing"
+            continue
+        new_entries.append({
+            "name": s["name"],
+            "artist": s.get("artist", ""),
+            "album": s.get("album", ""),
+            "timestamp": int(ts),
+        })
+
+    # Load existing history
+    existing_data = _load_store(_LASTFM_HISTORY_FILE)
+    existing_entries = existing_data.get("scrobbles", []) if existing_data else []
+
+    # Build set of existing keys for dedup: (name_lower, artist_lower, timestamp)
+    existing_keys = set()
+    for e in existing_entries:
+        existing_keys.add((
+            e["name"].strip().lower(),
+            e["artist"].strip().lower(),
+            e["timestamp"],
+        ))
+
+    # Merge
+    new_count = 0
+    merged = list(existing_entries)
+    for e in new_entries:
+        key = (e["name"].strip().lower(), e["artist"].strip().lower(), e["timestamp"])
+        if key not in existing_keys:
+            merged.append(e)
+            existing_keys.add(key)
+            new_count += 1
+
+    # Sort by timestamp (oldest first) for clean storage
+    merged.sort(key=lambda x: x["timestamp"])
+
+    data = {
+        "source": "lastfm_history",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(merged),
+        "scrobbles": merged,
+    }
+    _save_store(_LASTFM_HISTORY_FILE, data)
+    return _LASTFM_HISTORY_FILE, new_count
+
+
+def load_scrobble_history() -> dict | None:
+    """Load raw scrobble history from local store.
+
+    Returns:
+        Dict with keys (source, fetched_at, count, scrobbles), or None.
+    """
+    return _load_store(_LASTFM_HISTORY_FILE)

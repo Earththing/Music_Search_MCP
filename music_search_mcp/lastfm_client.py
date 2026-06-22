@@ -1,23 +1,20 @@
 """Last.fm API client for fetching scrobble history.
 
 Rate limits: Last.fm allows max 5 requests/second averaged over 5 minutes.
-We throttle to ~4 req/sec (250ms between requests) to stay safely under.
+Throttling is handled by the shared RateLimiter (4 req/sec).
 """
 
 import time
 import requests
 
 from .config import get_lastfm_config
+from .rate_limiter import LASTFM_LIMITER
 
 LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/"
 
 # Retry config for transient server errors
 _MAX_RETRIES = 5
 _RETRY_DELAY = 3  # seconds, doubles each retry
-
-# Rate limit: Last.fm allows 5 req/sec. We target 4 req/sec to be safe.
-_MIN_REQUEST_INTERVAL = 0.25  # seconds between requests
-_last_request_time = 0.0
 
 
 def _lastfm_request(method: str, **params) -> dict:
@@ -42,22 +39,26 @@ def _lastfm_request(method: str, **params) -> dict:
         **params,
     }
 
-    # Throttle: ensure minimum interval between requests
-    global _last_request_time
-    elapsed = time.time() - _last_request_time
-    if elapsed < _MIN_REQUEST_INTERVAL:
-        time.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+    # Throttle via shared rate limiter (thread-safe, 4 req/sec)
+    LASTFM_LIMITER.acquire()
 
     delay = _RETRY_DELAY
     for attempt in range(_MAX_RETRIES):
         try:
-            _last_request_time = time.time()
             resp = requests.get(LASTFM_API_URL, params=query, timeout=30)
             resp.raise_for_status()
 
             data = resp.json()
 
+            # Check for Last.fm rate limit error (error code 29)
             if "error" in data:
+                if data["error"] == 29:
+                    import sys
+                    print(f"\n  Last.fm rate limit exceeded! Waiting 60s...",
+                          file=sys.stderr)
+                    time.sleep(60)
+                    LASTFM_LIMITER.acquire()
+                    continue
                 raise ValueError(f"Last.fm API error {data['error']}: {data.get('message', '')}")
 
             return data
@@ -73,17 +74,21 @@ def _lastfm_request(method: str, **params) -> dict:
                       file=sys.stderr, end="", flush=True)
                 time.sleep(delay)
                 delay *= 2  # exponential backoff
+                LASTFM_LIMITER.acquire()  # re-acquire before retrying
                 continue
 
             raise  # re-raise on final attempt or non-retryable error
 
 
-def fetch_scrobbles(limit: int | None = None) -> list[dict]:
+def fetch_scrobbles(limit: int | None = None, since_timestamp: int | None = None) -> list[dict]:
     """Fetch the user's scrobble (listening) history from Last.fm.
 
     Args:
         limit: Maximum number of scrobbles to fetch. None means fetch all.
               Note: fetching all can be slow for large histories (1000s of songs).
+        since_timestamp: Only fetch scrobbles after this Unix timestamp.
+              Used for incremental loading — pass the latest timestamp from a
+              previous fetch to get only new scrobbles.
 
     Returns:
         List of scrobble dictionaries with keys:
@@ -102,6 +107,13 @@ def fetch_scrobbles(limit: int | None = None) -> list[dict]:
     page = 1
     per_page = 200  # Last.fm API max per request
 
+    # Build optional params for incremental loading
+    extra_params = {}
+    if since_timestamp is not None:
+        # 'from' parameter: only return scrobbles after this timestamp
+        # Add 1 so we don't re-fetch the exact last scrobble
+        extra_params["from"] = since_timestamp + 1
+
     try:
         while True:
             data = _lastfm_request(
@@ -110,6 +122,7 @@ def fetch_scrobbles(limit: int | None = None) -> list[dict]:
                 limit=per_page,
                 page=page,
                 extended=0,
+                **extra_params,
             )
 
             tracks_data = data.get("recenttracks", {})
@@ -171,6 +184,54 @@ def fetch_scrobbles(limit: int | None = None) -> list[dict]:
         sys.stdout.flush()
 
     return scrobbles
+
+
+def get_track_info(track_name: str, artist_name: str,
+                   username: str | None = None) -> dict | None:
+    """Get detailed info about a track from Last.fm.
+
+    When username is provided, includes per-user play count.
+    Also returns global listeners, playcount, and top tags.
+
+    Args:
+        track_name: The track title.
+        artist_name: The artist name.
+        username: Optional Last.fm username for per-user play count.
+
+    Returns:
+        Dict with keys: user_playcount, listeners, playcount, tags, loved.
+        Returns None on error.
+    """
+    config = get_lastfm_config()
+    user = username or config["username"]
+
+    try:
+        data = _lastfm_request(
+            "track.getInfo",
+            track=track_name,
+            artist=artist_name,
+            username=user,
+        )
+    except Exception:
+        return None
+
+    track = data.get("track")
+    if not track:
+        return None
+
+    # Extract top tags (list of {"name": "rock", "url": "..."})
+    raw_tags = track.get("toptags", {}).get("tag", [])
+    if isinstance(raw_tags, dict):
+        raw_tags = [raw_tags]
+    tags = [t["name"] for t in raw_tags if t.get("name")]
+
+    return {
+        "user_playcount": int(track.get("userplaycount", 0)),
+        "listeners": int(track.get("listeners", 0)),
+        "playcount": int(track.get("playcount", 0)),
+        "tags": tags,
+        "loved": track.get("userloved", "0") == "1",
+    }
 
 
 def get_scrobble_stats(username: str | None = None) -> dict:
